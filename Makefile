@@ -1,8 +1,9 @@
 
 
-TARGET=main
+TARGET=apager
+OBJS:=$(patsubst %.c, %.o, $(wildcard *.c))
 
-$(TARGET) : main.o
+$(TARGET) : $(OBJS)
 	$(CC) $^ -o $@
 
 %.o: %.c
