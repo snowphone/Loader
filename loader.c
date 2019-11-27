@@ -1,5 +1,8 @@
 #include "loader.h"
 
+#include "common.h"
+#include "dyn_linker.h"
+
 #include <elf.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -14,23 +17,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-typedef Elf64_Ehdr Ehdr;
-typedef Elf64_Phdr Phdr;
-typedef Elf64_Shdr Shdr;
-
-#ifndef PAGE_SIZE
-	#define PAGE_SIZE (getpagesize())	//included in POSIX
-#endif
-
-#define MEM_ALIGN(M/*memory*/, U/*page unit*/) (void*)((uint64_t)(M) & ~((uint64_t)(U) - 1ull))
-#define MEM_OFFSET(M, U) ((uint64_t)(M) & ((uint64_t)(U) - 1ull))
 
 static void* bind_section(const int fd, const Ehdr* const elf_hdr, const Phdr* const it);
 static int make_prot(const int p_flags);
-static const Shdr* find_shdr(const Shdr* const table, const size_t len, int item);
 static const Phdr* find_phdr(const Phdr* const table, const size_t len, int item);
 static Ehdr* read_elf(const char* const buf);
-static Shdr* read_sect_hdr_table(const Ehdr* e_hdr, const char* const buf);
 static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf);
 static size_t get_size(int fd);
 
@@ -91,7 +82,7 @@ static void* bind_section(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 	void* const addr = MEM_ALIGN(it->p_vaddr, PAGE_SIZE);
 	const size_t len = it->p_filesz + MEM_OFFSET(it->p_vaddr, it->p_align);
 	const int prot = make_prot(it->p_flags);
-	const int flags = (elf_hdr->e_type == ET_EXEC) ? (MAP_PRIVATE | MAP_EXECUTABLE) : MAP_PRIVATE;
+	const int flags = (elf_hdr->e_type == ET_EXEC) ? (MAP_PRIVATE | MAP_FIXED) : MAP_PRIVATE;
 	const unsigned int file_offset = it->p_offset - MEM_OFFSET(it->p_vaddr, PAGE_SIZE);
 
 	void* const mapped = mmap(addr, len, prot, flags, fd, file_offset);
@@ -121,14 +112,6 @@ static int make_prot(const int p_flags) {
 	return prot;
 }
 
-
-
-static Shdr* read_sect_hdr_table(const Ehdr* e_hdr, const char* const buf) {
-	size_t size = e_hdr->e_shentsize * e_hdr->e_shnum;
-
-	return (Shdr*) (buf + e_hdr->e_shoff);
-}
-
 static const Phdr* find_phdr(const Phdr* const table, const size_t len, int item) {
 	for(const Phdr* it = table; it != table + len; ++it) {
 		if(it->p_type == item)
@@ -136,11 +119,3 @@ static const Phdr* find_phdr(const Phdr* const table, const size_t len, int item
 	}
 	return NULL;
 }
-static const Shdr* find_shdr(const Shdr* const table, const size_t len, int item) {
-	for(const Shdr* it = table; it != table + len; ++it) {
-		if(it->sh_type == item)
-			return it;
-	}
-	return NULL;
-}
-
