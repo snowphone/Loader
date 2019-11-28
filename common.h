@@ -19,6 +19,13 @@ typedef Elf64_Ehdr Ehdr;
 typedef Elf64_Phdr Phdr;
 typedef Elf64_Shdr Shdr;
 
+#ifndef NDEBUG
+ #define DEBUG(...) fprintf(stderr, __VA_ARGS__);
+#else
+ /* Ignore */
+ #define DEBUG(...) ;
+#endif
+
 #ifndef MIN
  #define MIN(X, Y) ((X) < (Y) ? (X) : (Y))
 #endif

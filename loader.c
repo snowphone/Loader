@@ -17,12 +17,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-enum { STACK_SIZE = 8192000, };
+enum { STACK_SIZE = PAGE_SIZE * 32ull, };
 
 typedef struct Auxv_info {
 		uint64_t fd;
 		Ehdr elf_hdr;
 		uint64_t base_addr;
+		Phdr* p_tab;	// program header table
 		int argc;
 		const char** argv;
 		const char** envp;
@@ -33,7 +34,7 @@ typedef struct Stk_entry {
 } Stk_entry;
 
 
-static void* bind_section(const int fd, const Ehdr* const elf_hdr, const Phdr* const it);
+static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const it);
 static int make_prot(const int p_flags);
 static const Phdr* find_phdr(const Phdr* const table, const size_t len, int item);
 static Ehdr* read_elf(const char* const buf);
@@ -44,36 +45,46 @@ static Stk_entry make_stack(const Auxv_info info);
 static unsigned long long memory_usage;
 
 void my_exec(const int argc, const char* argv[], const char* envp[]) {
-	FILE* fp = fopen(argv[0], "r+b");
-	int fd = fileno(fp);
-	size_t sz = get_size(fd);
-	const char* const buf = mmap(0, sz, PROT_READ, MAP_PRIVATE, fd, 0);
+	Auxv_info info = { 
+		.fd = open(argv[1], O_RDWR),
+		.argc = argc - 1,
+		.argv = argv + 1,
+		.envp = envp,
+		.base_addr = UINT64_MAX,
+	};
 
-	const Ehdr* const elf_hdr = read_elf(buf);
-	const Phdr* const prog_hdr_table = read_prog_hdr_table(elf_hdr, buf);
+	// Read ELF header
+	lseek(info.fd, 0, SEEK_SET);
+	read(info.fd, &info.elf_hdr, sizeof(info.elf_hdr));
 
-	void* base_addr = (void*)INT64_MAX;
-	for(const Phdr* it = prog_hdr_table; it != prog_hdr_table + elf_hdr->e_phnum; ++it) {
+	assert( memcmp(info.elf_hdr.e_ident, ELFMAG, SELFMAG) == 0);
+	assert( info.elf_hdr.e_ident[EI_CLASS] == ELFCLASS64);
+	assert( info.elf_hdr.e_type == ET_EXEC || info.elf_hdr.e_type == ET_DYN);
+
+	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
+
+	// Read program header table
+	size_t p_tab_sz = info.elf_hdr.e_phentsize * info.elf_hdr.e_phnum;
+	info.p_tab = malloc(p_tab_sz);
+
+	lseek(info.fd, info.elf_hdr.e_phoff, SEEK_SET);
+	read(info.fd, info.p_tab, p_tab_sz);
+
+	DEBUG("# of segments: %d\n", info.elf_hdr.e_phnum);
+
+	for(Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
+		DEBUG("TYPE: %u, virt addr : %#lx \n",it->p_type, it->p_vaddr );
 		if(it->p_type == PT_LOAD){
-			void* mapped_addr = bind_section(fd, elf_hdr, it);
-				base_addr = MIN(base_addr, mapped_addr);
+			uint64_t mapped_addr = (uint64_t)bind_segment(info.fd, &info.elf_hdr, it);
+				info.base_addr = MIN(info.base_addr, mapped_addr);
 		}
 	}
 
 
-	fprintf(stderr, "Base address: %p\n", base_addr);
+	fprintf(stderr, "Base address: %#lx\n", info.base_addr);
 	//fclose(fp);
 
-	Stk_entry stk_e = make_stack((Auxv_info){
-			.fd = fd,
-			.elf_hdr = *elf_hdr,
-			.base_addr = (uint64_t)base_addr,
-			.argc = argc - 1,
-			.argv = argv - 1,
-			.envp = envp,
-			});
-
-	uint64_t entry_addr = elf_hdr->e_entry;
+	Stk_entry stk_e = make_stack(info);
 
 	asm("xor %%rax, %%rax;"
       "xor %%rbx, %%rbx;"
@@ -97,33 +108,12 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	// mov src dst
 	asm("movq %0, %%rsp\n\t" : "+r" (stk_e.sp));
 	asm("movq %0, %%rbp\n\t" : "+r" (stk_e.bp));
-	asm("movq %0, %%rax\n\t" : "+r" (entry_addr));
-	asm("movq $0, %rdx");
+	asm("movq %0, %%rax\n\t" : "+r" (info.elf_hdr.e_entry));
 	// jmp to *register means jmp to absolute addr.
 	asm("jmp *%rax\n\t");	
 
 }
 
-static size_t get_size(int fd) {
-	struct stat st;
-	fstat(fd, &st);
-	return st.st_size;
-}
-
-static Ehdr* read_elf(const char* const buf) {
-	Ehdr* header = (Ehdr*)buf;
-
-	assert( "Magic number verification" &&
-			memcmp(header->e_ident, ELFMAG, SELFMAG) == 0);
-
-	assert( "Check whether ELF64 is correct" &&
-			header->e_ident[EI_CLASS] == ELFCLASS64);
-
-	assert( "Check whether executable" &&
-			header->e_type == ET_EXEC || header->e_type == ET_DYN);
-
-	return header;
-}
 
 static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 	assert(e_hdr->e_phentsize == sizeof(Phdr));
@@ -134,24 +124,31 @@ static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 	return (Phdr*) (buf + e_hdr->e_phoff);
 }
 
-static void* bind_section(const int fd, const Ehdr* const elf_hdr, const Phdr* const it) {
+static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const it) {
+	// cf. A segment contains several sections such as .text, .init, and so on.
 	void* const aligned_addr = MEM_ALIGN(it->p_vaddr, PAGE_SIZE);
 	const int front_pad = MEM_OFFSET(it->p_vaddr, PAGE_SIZE);
 	const size_t len = it->p_filesz + front_pad;
 	const int prot = make_prot(it->p_flags);
-	const int flags =  (MAP_PRIVATE | MAP_FIXED);
+	const int flags = elf_hdr->e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
 	const unsigned int file_offset = it->p_offset - front_pad;
 
 	void* const mapped = mmap(aligned_addr, len, prot, flags, fd, file_offset);
 	assert(mapped != MAP_FAILED);
 	memset(mapped, 0, front_pad);
 
+
+
 	if(it->p_memsz > it->p_filesz && (prot & PROT_WRITE)) {
+		DEBUG("BSS section\n");
 		/* zero fill procedure for .bss section */
-		void* const p = (char*)mapped + front_pad + it->p_filesz;
-		void* bss = mmap(p,it->p_memsz - it->p_filesz, prot, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-		assert(bss != MAP_FAILED);
-		memset(p, 0, it->p_memsz - it->p_filesz);
+		uint64_t elf_bss = it->p_vaddr + it->p_filesz;
+		size_t size = MEM_OFFSET(elf_bss, PAGE_SIZE);
+		if(size) {
+			size = PAGE_SIZE - size;
+			memset((void*)elf_bss, 0, size);
+			DEBUG("Clear bits!\n");
+		}
 	}
 
 	memory_usage += it->p_filesz;
@@ -188,13 +185,16 @@ static Elf64_auxv_t* get_auxv(const char* envp[]) {
 }
 
 static Stk_entry make_stack(const Auxv_info info) {
+
+	DEBUG("Enter make_stack\n");
+
 	void* sp = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	assert(sp != MAP_FAILED);
 	memory_usage += STACK_SIZE;
-	fprintf(stderr, "Virtual address: %p, memory_size: %d, total memory usage: %llu B\n", sp, STACK_SIZE, memory_usage);
+	fprintf(stderr, "STACK: Virtual address: %p, memory_size: %d, total memory usage: %llu B\n", sp, STACK_SIZE, memory_usage);
 	// According to some sources, MAP_GROWSDOWN is buggy
 	// Check http://lkml.iu.edu/hypermail/linux/kernel/0808.1/2846.html
-	
+
 	sp += STACK_SIZE;
 
 	void* const bp = sp;
@@ -238,6 +238,6 @@ static Stk_entry make_stack(const Auxv_info info) {
 		memmove(sp, &info.argc, sizeof(info.argc));
 	}
 
-	return (Stk_entry){ .bp = bp, .sp = sp };
+	return (Stk_entry){ .bp = (uint64_t)bp, .sp = (uint64_t)sp };
 }
 
