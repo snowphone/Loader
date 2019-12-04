@@ -13,11 +13,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
 
-enum { STACK_SIZE = PAGE_SIZE * 32ull, };
+enum { STACK_SIZE = PAGE_SIZE * 64ULL, };
 
 typedef struct Auxv_info {
 		uint64_t fd;
@@ -46,16 +45,17 @@ static unsigned long long memory_usage;
 
 void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	Auxv_info info = { 
-		.fd = open(argv[1], O_RDWR),
-		.argc = argc - 1,
-		.argv = argv + 1,
+		.fd = open(argv[0], O_RDWR),
+		.argc = argc,
+		.argv = argv,
 		.envp = envp,
 		.base_addr = UINT64_MAX,
 	};
 
 	// Read ELF header
 	lseek(info.fd, 0, SEEK_SET);
-	read(info.fd, &info.elf_hdr, sizeof(info.elf_hdr));
+#define READ(FD, BUF, SZ) assert(read(FD, BUF, SZ))
+	READ(info.fd, &info.elf_hdr, sizeof(info.elf_hdr));
 
 	assert( memcmp(info.elf_hdr.e_ident, ELFMAG, SELFMAG) == 0);
 	assert( info.elf_hdr.e_ident[EI_CLASS] == ELFCLASS64);
@@ -68,7 +68,9 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	info.p_tab = malloc(p_tab_sz);
 
 	lseek(info.fd, info.elf_hdr.e_phoff, SEEK_SET);
-	read(info.fd, info.p_tab, p_tab_sz);
+	READ(info.fd, info.p_tab, p_tab_sz);
+
+#undef READ
 
 	DEBUG("# of segments: %d\n", info.elf_hdr.e_phnum);
 
@@ -78,6 +80,11 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 			uint64_t mapped_addr = (uint64_t)bind_segment(info.fd, &info.elf_hdr, it);
 				info.base_addr = MIN(info.base_addr, mapped_addr);
 		}
+
+		const Phdr* interpreter;	// dynamic linker interpreter(ld-linux.so)
+		if((interpreter = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_DYNAMIC))) {
+			assert("Not yet implemened" && 0);
+		}
 	}
 
 
@@ -85,33 +92,59 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	//fclose(fp);
 
 	Stk_entry stk_e = make_stack(info);
+	uint64_t entry_p = info.elf_hdr.e_entry;
+	uint64_t sp = stk_e.sp;
 
-	asm("xor %%rax, %%rax;"
-      "xor %%rbx, %%rbx;"
-      "xor %%rcx, %%rcx;"
-      "xor %%rdx, %%rdx;"
-      "xor %%rsi, %%rsi;"
-      "xor %%rdi, %%rdi;"
-      "xor %%r8, %%r8;"
-      "xor %%r9, %%r9;"
-      "xor %%r10, %%r10;"
-      "xor %%r11, %%r11;"
-      "xor %%r12, %%r12;"
-      "xor %%r13, %%r13;"
-      "xor %%r14, %%r14;"
-      "xor %%r15, %%r15;"
-      :
-      :
-      :"%rax", "%rbx", "%rcx", "%rdx", "%rsi", "%rdi", "%rsp", "%r8", "%r9", "%r10", "%r11", "%r12", "%r13", "%r14", "%r15"
-     );
+	DEBUG("base p: %#lx, stk p: %#lx\n", stk_e.bp, stk_e.sp);
+	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
+
+	DEBUG("argc: %d\n", *(int*)sp);
+	DEBUG("argv[0]: %s\n", *(char**)(sp + 4));
+
+
+	//asm __volatile__(
+	//  "xor %rax, %rax\n\t"
+    //  "xor %rbx, %rbx\n\t"
+    //  "xor %rcx, %rcx\n\t"
+    //  "xor %rdx, %rdx\n\t"
+    //  "xor %rsi, %rsi\n\t"
+    //  "xor %rdi, %rdi\n\t"
+    //  "xor %r8, %r8\n\t"
+    //  "xor %r9, %r9\n\t"
+    //  "xor %r10, %r10\n\t"
+    //  "xor %r11, %r11\n\t"
+    //  "xor %r12, %r12\n\t"
+    //  "xor %r13, %r13\n\t"
+    //  "xor %r14, %r14\n\t"
+    //  "xor %r15, %r15\n\t"
+    // );
 
 	// mov src dst
-	asm("movq %0, %%rsp\n\t" : "+r" (stk_e.sp));
-	asm("movq %0, %%rbp\n\t" : "+r" (stk_e.bp));
-	asm("movq %0, %%rax\n\t" : "+r" (info.elf_hdr.e_entry));
-	// jmp to *register means jmp to absolute addr.
-	asm("jmp *%rax\n\t");	
+	// cf. in x86-64, rbp won't be used as frame pointer
+	asm __volatile__(
+			"movq %0, %%rax\n\t"
+			"movq %1, %%rsp\n\t"
+			"xor %%rdx, %%rdx\n\t"
+			//  "xor %rbx, %rbx\n\t"
+			//  "xor %rcx, %rcx\n\t"
+			//  "xor %rdx, %rdx\n\t"
+			//  "xor %rsi, %rsi\n\t"
+			//  "xor %rdi, %rdi\n\t"
+			//  "xor %r8, %r8\n\t"
+			//  "xor %r9, %r9\n\t"
+			//  "xor %r10, %r10\n\t"
+			//  "xor %r11, %r11\n\t"
+			//  "xor %r12, %r12\n\t"
+			//  "xor %r13, %r13\n\t"
+			//  "xor %r14, %r14\n\t"
+			//  "xor %r15, %r15\n\t"
+			// );
 
+			//"xor %%rax, %%rax\n\t"
+			"jmp %%rax\n\t"
+			:
+			: "r" (entry_p), "r" (sp)
+			);
 }
 
 
@@ -135,6 +168,7 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 
 	void* const mapped = mmap(aligned_addr, len, prot, flags, fd, file_offset);
 	assert(mapped != MAP_FAILED);
+	// Memory is mapped in private mode, so its modification only affects on private copy, not the file. 
 	memset(mapped, 0, front_pad);
 
 
@@ -142,13 +176,17 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 	if(it->p_memsz > it->p_filesz && (prot & PROT_WRITE)) {
 		DEBUG("BSS section\n");
 		/* zero fill procedure for .bss section */
-		uint64_t elf_bss = it->p_vaddr + it->p_filesz;
+		void* elf_bss = (void*)(it->p_vaddr + it->p_filesz);
 		size_t size = MEM_OFFSET(elf_bss, PAGE_SIZE);
-		if(size) {
-			size = PAGE_SIZE - size;
-			memset((void*)elf_bss, 0, size);
-			DEBUG("Clear bits!\n");
+		if(!size) {
+			// The mapped region is assigned just as filesz, so there's no space for .bss section. 
+			// Map .bss section explicitly
+			void* mapped_bss = mmap(elf_bss, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, -1, 0);
+			assert(mapped_bss != MAP_FAILED);
 		}
+		size = PAGE_SIZE - size;
+		memset((void*)elf_bss, 0, size);
+		DEBUG("Clear bits!\n");
 	}
 
 	memory_usage += it->p_filesz;
@@ -237,6 +275,10 @@ static Stk_entry make_stack(const Auxv_info info) {
 		sp -= sizeof(info.argc);
 		memmove(sp, &info.argc, sizeof(info.argc));
 	}
+	DEBUG("ARGC1: %d\n", info.argc);
+	DEBUG("ARGC2: %d\n", *(int*)sp);
+	DEBUG("&ARGC: %p\n", (int*)sp);
+	DEBUG("&ARGC: %p\n", sp);
 
 	return (Stk_entry){ .bp = (uint64_t)bp, .sp = (uint64_t)sp };
 }

@@ -1,13 +1,13 @@
-
-
 TARGET=apager
 OBJS:=$(patsubst %.c, %.o, $(wildcard *.c))
+CPPFLAGS=
+CFLAGS=-Og -g
 
 $(TARGET) : $(OBJS)
 	$(CC) $^ -o $@
 
 %.o: %.c
-	$(CC) -g -O0 -c $<
+	$(CC) $(CPPFLAGS) $(CFLAGS) -c $<
 
 clean:
 	$(RM) $(TARGET) *.o

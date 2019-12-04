@@ -13,6 +13,6 @@ int main(int argc, const char* argv[], const char* envp[]) {
 		fprintf(stderr, "Usage: %s <program>, [...]", argv[0]);
 		exit(1);
 	}
-	my_exec(argc, argv, envp);
+	my_exec(argc - 1, argv + 1, envp);
 }
 

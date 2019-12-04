@@ -11,16 +11,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 #include <stdbool.h>
 #include <stdint.h>
+#ifdef NDEBUG
+ #undef NDEBUG
+ #include <assert.h>
+ #define NDEBUG
+#else
+ #include <assert.h>
+#endif
 
 typedef Elf64_Ehdr Ehdr;
 typedef Elf64_Phdr Phdr;
 typedef Elf64_Shdr Shdr;
 
+#define verify(...) assert(__VA_ARGS__)
+
 #ifndef NDEBUG
- #define DEBUG(...) fprintf(stderr, __VA_ARGS__);
+ #define DEBUG(...) fprintf(stderr, __VA_ARGS__)
 #else
  /* Ignore */
  #define DEBUG(...) ;
