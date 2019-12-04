@@ -23,7 +23,7 @@ typedef struct Auxv_info {
 		Ehdr elf_hdr;
 		uint64_t base_addr;
 		Phdr* p_tab;	// program header table
-		int argc;
+		uint64_t argc;
 		const char** argv;
 		const char** envp;
 	}Auxv_info;
@@ -98,8 +98,8 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	DEBUG("base p: %#lx, stk p: %#lx\n", stk_e.bp, stk_e.sp);
 	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
 
-	DEBUG("argc: %d\n", *(int*)sp);
-	DEBUG("argv[0]: %s\n", *(char**)(sp + 4));
+	DEBUG("argc: %lu\n", *(uint64_t*)sp);
+	DEBUG("argv[0]: %s\n", *(char**)(sp + sizeof info.argc));
 
 
 	//asm __volatile__(
@@ -122,26 +122,25 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	// mov src dst
 	// cf. in x86-64, rbp won't be used as frame pointer
 	asm __volatile__(
-			"movq %0, %%rax\n\t"
+			"movq %0, %%rbp\n\t"
 			"movq %1, %%rsp\n\t"
-			"xor %%rdx, %%rdx\n\t"
-			//  "xor %rbx, %rbx\n\t"
-			//  "xor %rcx, %rcx\n\t"
-			//  "xor %rdx, %rdx\n\t"
-			//  "xor %rsi, %rsi\n\t"
-			//  "xor %rdi, %rdi\n\t"
-			//  "xor %r8, %r8\n\t"
-			//  "xor %r9, %r9\n\t"
-			//  "xor %r10, %r10\n\t"
-			//  "xor %r11, %r11\n\t"
-			//  "xor %r12, %r12\n\t"
-			//  "xor %r13, %r13\n\t"
-			//  "xor %r14, %r14\n\t"
-			//  "xor %r15, %r15\n\t"
-			// );
 
-			//"xor %%rax, %%rax\n\t"
-			"jmp %%rax\n\t"
+			"xor %%rax, %%rax\n\t"
+			"xor %%rbx, %%rbx\n\t"
+			"xor %%rcx, %%rcx\n\t"
+			"xor %%rdx, %%rdx\n\t"
+			"xor %%rsi, %%rsi\n\t"
+			"xor %%rdi, %%rdi\n\t"
+			"xor %%r8, %%r8\n\t"
+			"xor %%r9, %%r9\n\t"
+			"xor %%r10, %%r10\n\t"
+			"xor %%r11, %%r11\n\t"
+			"xor %%r12, %%r12\n\t"
+			"xor %%r13, %%r13\n\t"
+			"xor %%r14, %%r14\n\t"
+			"xor %%r15, %%r15\n\t"
+
+			"jmp %%rbp\n\t"
 			:
 			: "r" (entry_p), "r" (sp)
 			);
@@ -168,6 +167,7 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 
 	void* const mapped = mmap(aligned_addr, len, prot, flags, fd, file_offset);
 	assert(mapped != MAP_FAILED);
+	assert(mapped == aligned_addr);
 	// Memory is mapped in private mode, so its modification only affects on private copy, not the file. 
 	memset(mapped, 0, front_pad);
 
@@ -275,7 +275,7 @@ static Stk_entry make_stack(const Auxv_info info) {
 		sp -= sizeof(info.argc);
 		memmove(sp, &info.argc, sizeof(info.argc));
 	}
-	DEBUG("ARGC1: %d\n", info.argc);
+	DEBUG("ARGC1: %lu\n", info.argc);
 	DEBUG("ARGC2: %d\n", *(int*)sp);
 	DEBUG("&ARGC: %p\n", (int*)sp);
 	DEBUG("&ARGC: %p\n", sp);
