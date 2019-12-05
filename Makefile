@@ -1,7 +1,7 @@
 TARGET=apager
 OBJS:=$(patsubst %.c, %.o, $(wildcard *.c))
 CPPFLAGS=
-CFLAGS=-Og -g 
+CFLAGS=-Og -g  -DNDEBUG
 
 $(TARGET) : $(OBJS)
 	$(CC) $^ -o $@

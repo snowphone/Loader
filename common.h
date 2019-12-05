@@ -24,6 +24,7 @@
 typedef Elf64_Ehdr Ehdr;
 typedef Elf64_Phdr Phdr;
 typedef Elf64_Shdr Shdr;
+typedef Elf64_auxv_t Auxv_t;
 
 #ifndef NDEBUG
  #define DEBUG(...) fprintf(stderr, __VA_ARGS__)

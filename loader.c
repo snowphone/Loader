@@ -39,13 +39,18 @@ static uint64_t make_stack(const Info info);
 
 static unsigned long long memory_usage;
 
-void my_exec(const int argc, const char* argv[], const char* envp[]) {
+void Execve(const int argc, const char* argv[], const char* envp[]) {
 	Info info = { 
 		.fd = open(argv[0], O_RDWR),
 		.argc = argc,
 		.argv = argv,
 		.envp = envp,
 		.base_addr = UINT64_MAX,
+		
+		/*
+		.elf_hdr
+		.p_tab
+		*/
 	};
 
 	// Read ELF header
@@ -79,16 +84,15 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 
 		const Phdr* interpreter;	// dynamic linker interpreter(ld-linux.so)
 		if((interpreter = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_DYNAMIC))) {
-			assert("Not yet implemened" && 0);
+			assert("Not yet implemented" && 0);
 		}
 	}
 
 
 	fprintf(stderr, "Base address: %#lx\n", info.base_addr);
-	//fclose(fp);
 
-	uint64_t entry_p = info.elf_hdr.e_entry;
-	uint64_t sp = make_stack(info);
+	const uint64_t entry_p = info.elf_hdr.e_entry;
+	const uint64_t sp = make_stack(info);
 
 	DEBUG("stk p: %#lx\n", sp);
 	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
@@ -97,12 +101,13 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	DEBUG("argv[0]: %s\n", *(char**)(sp + sizeof info.argc));
 
 
+	fputs("==================== End of Loader ====================\n", stderr);
 
 	// mov src dst
 	// cf. in x86-64, rbp won't be used as frame pointer
 	asm __volatile__(
-			"movq %0, %%rbp\n\t"
 			"movq %1, %%rsp\n\t"
+			"movq %0, %%rbp\n\t"
 
 			"xor %%rax, %%rax\n\t"
 			"xor %%rbx, %%rbx\n\t"
@@ -138,7 +143,7 @@ static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const it) {
 	// cf. A segment contains several sections such as .text, .init, and so on.
 	void* const aligned_addr = MEM_ALIGN(it->p_vaddr, PAGE_SIZE);
-	const int front_pad = MEM_OFFSET(it->p_vaddr, PAGE_SIZE);
+	const uint64_t front_pad = MEM_OFFSET(it->p_vaddr, PAGE_SIZE);
 	const size_t len = MEM_CEIL(it->p_memsz + front_pad, PAGE_SIZE);
 	const int prot = make_prot(it->p_flags);
 	const int flags = elf_hdr->e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
@@ -150,14 +155,15 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 	// Memory is mapped in private mode, so its modification only affects on private copy, not the file. 
 	memset(mapped, 0, front_pad);
 
-	void* const bss = mapped + it->p_filesz;
+	void* const bss = mapped + front_pad + it->p_filesz;
 	const size_t bss_size = it->p_memsz - it->p_filesz;
 
 	memset(bss, 0, bss_size);
+	DEBUG("BSS: clear [%p, %p)\n", bss, bss + bss_size);
 
 	memory_usage += it->p_filesz;
 	fprintf(stderr, "Virtual address: [%p, %p), file offset: %u, total memory usage: %llu B\n", mapped, mapped + len, file_offset, memory_usage);
-	return mapped;
+	return mapped + front_pad;
 }
 
 static int make_prot(const int p_flags) {
@@ -181,47 +187,32 @@ static const Phdr* find_phdr(const Phdr* const table, const size_t len, int item
 	return NULL;
 }
 
-static Elf64_auxv_t* get_auxv(const char* envp[]) {
+static Auxv_t* get_auxv(const char* envp[]) {
 	const char** p = envp;
 	while(*p++) ; //After the loop, p points auxv;
 
-	return (Elf64_auxv_t*)p;
+	return (Auxv_t*)p;
 }
 
 static uint64_t make_stack(const Info info) {
-
-	DEBUG("Enter make_stack\n");
-
 	void* sp = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	assert(sp != MAP_FAILED);
-	//memset(sp, 0, STACK_SIZE);
 	memory_usage += STACK_SIZE;
 	fprintf(stderr, "STACK: Virtual address: %p, memory_size: %d, total memory usage: %llu B\n", sp, STACK_SIZE, memory_usage);
 	// According to some sources, MAP_GROWSDOWN is buggy
 
 	sp += STACK_SIZE;
 
-	void* const bp = sp;
-
-	size_t envc;
-	{
-		const char** it = info.envp;
-		while(*it++ != NULL);
-		envc = it - info.envp - 2;	// envc doesn't count last NULL
-	}
-
+	Auxv_t* auxv = get_auxv(info.envp);
 	{	// copy auxv to stack
 
-		DEBUG("################ CHANGE AUXV ##################\n");
-		Elf64_auxv_t* auxv = info.envp + envc + 1;
-		Elf64_auxv_t *it = auxv;
+		Auxv_t *it = auxv;
 		size_t auxc;	// Includes AT_NULL element
 		
 		for(it = auxv, auxc = 1; it->a_type != AT_NULL ; ++it, ++auxc) {
-			DEBUG("#%ld: type: %lu, value: %lu\n",it - auxv, it->a_type, it->a_un.a_val);
 			switch(it->a_type) {
 				case AT_EXECFN:
-					it->a_un.a_val = info.argv[0];
+					it->a_un.a_val = (uint64_t)info.argv[0];
 					break;
 				case AT_EXECFD:
 					it->a_un.a_val = info.fd;
@@ -239,56 +230,34 @@ static uint64_t make_stack(const Info info) {
 					it->a_un.a_val = info.elf_hdr.e_phentsize;
 					break;
 				case AT_PHDR:
-					it->a_un.a_val = info.elf_hdr.e_phoff;
+					it->a_un.a_val = info.base_addr + info.elf_hdr.e_phoff;
 					break;
 			}
 		}
-		DEBUG("#%ld: type: %lu, value: %lu\n",it - auxv, it->a_type, it->a_un.a_val);
 
 
 		DEBUG("########## auxc: %ld ###########\n", auxc);
-		DEBUG("########## envc: %ld ###########\n", envc);
 
-		sp -= (auxc) * sizeof(Elf64_auxv_t);
-		memmove(sp, auxv, (auxc) * sizeof(Elf64_auxv_t));
-
-#ifndef NDEBUG
-		//DEBUG("&&&&&&&&&&&& STACK VERSION AUXV &&&&&&&&&&&&\n");
-		//for(it = sp; it->a_type != AT_NULL; ++it) {
-		//	DEBUG("#%ld: type: %lu, value: %lu\n",it - (Elf64_auxv_t*)sp, it->a_type, it->a_un.a_val);
-		//}
-		//DEBUG("#%ld: type: %lu, value: %lu\n",it - (Elf64_auxv_t*)sp, it->a_type, it->a_un.a_val);
-#endif
+		sp -= (auxc) * sizeof(Auxv_t);
+		memmove(sp, auxv, (auxc) * sizeof(Auxv_t));
 	}
 
+	const size_t envc = (const char**)auxv - info.envp;	// Includes NULL
 
 	// copy envp to stack
-	sp -= (envc + 1) * sizeof(char*);
-	memmove(sp, info.envp, (envc + 1) * sizeof(char*));
+	sp -= envc * sizeof(char*);
+	memmove(sp, info.envp, envc * sizeof(char*));
 
-#ifndef NDEBUG
-	//DEBUG("&&&&&&& environment vector &&&&&&&&\n");
-	//for(char** it = sp; *it; ++it){
-	//	DEBUG("#%d: %s\n",it - (char**)sp, *it);
-	//}
-#endif
+	DEBUG("########## envc: %ld ###########\n", envc);
 
 	// copy argv to stack
 	sp -= (info.argc + 1) * sizeof(char*);
 	memmove(sp, info.argv, (info.argc + 1) * sizeof(char*));
 
-#ifndef NDEBUG
-	//DEBUG("&&&&&&& argument vector &&&&&&&&\n");
-	//for(char** it = sp; *it; ++it){
-	//	DEBUG("#%d: %s\n",it - (char**)sp, *it);
-	//}
-#endif
-
 	// copy argc to stack
 	sp -= sizeof(info.argc);
 	memmove(sp, &info.argc, sizeof(info.argc));
 
-	DEBUG("SP: %p\n", sp);
 
 	return (uint64_t)sp;
 }
