@@ -25,8 +25,6 @@ typedef Elf64_Ehdr Ehdr;
 typedef Elf64_Phdr Phdr;
 typedef Elf64_Shdr Shdr;
 
-#define verify(...) assert(__VA_ARGS__)
-
 #ifndef NDEBUG
  #define DEBUG(...) fprintf(stderr, __VA_ARGS__)
 #else
@@ -45,5 +43,6 @@ typedef Elf64_Shdr Shdr;
 
 #define MEM_ALIGN(M/*memory*/, U/*page unit*/) (void*)((uint64_t)(M) & ~((uint64_t)(U) - 1ull))
 #define MEM_OFFSET(M, U) ((uint64_t)(M) & ((uint64_t)(U) - 1ull))
+#define MEM_CEIL(M, U) ( MEM_OFFSET(M, U) ? (uint64_t)MEM_ALIGN(M, U) + U : M )
 
 

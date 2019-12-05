@@ -71,7 +71,7 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	DEBUG("# of segments: %d\n", info.elf_hdr.e_phnum);
 
 	for(Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
-		DEBUG("TYPE: %u, virt addr : %#lx \n",it->p_type, it->p_vaddr );
+		DEBUG("SEGMENT TYPE: %u, virt addr range: [%#lx, %#lx)\n",it->p_type, it->p_vaddr,it->p_vaddr + it->p_memsz);
 		if(it->p_type == PT_LOAD){
 			uint64_t mapped_addr = (uint64_t)bind_segment(info.fd, &info.elf_hdr, it);
 				info.base_addr = MIN(info.base_addr, mapped_addr);
@@ -139,7 +139,7 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 	// cf. A segment contains several sections such as .text, .init, and so on.
 	void* const aligned_addr = MEM_ALIGN(it->p_vaddr, PAGE_SIZE);
 	const int front_pad = MEM_OFFSET(it->p_vaddr, PAGE_SIZE);
-	const size_t len = it->p_filesz + front_pad;
+	const size_t len = MEM_CEIL(it->p_memsz + front_pad, PAGE_SIZE);
 	const int prot = make_prot(it->p_flags);
 	const int flags = elf_hdr->e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
 	const unsigned int file_offset = it->p_offset - front_pad;
@@ -150,26 +150,13 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 	// Memory is mapped in private mode, so its modification only affects on private copy, not the file. 
 	memset(mapped, 0, front_pad);
 
+	void* const bss = mapped + it->p_filesz;
+	const size_t bss_size = it->p_memsz - it->p_filesz;
 
-
-	if(it->p_memsz > it->p_filesz && (prot & PROT_WRITE)) {
-		DEBUG("BSS section\n");
-		/* zero fill procedure for .bss section */
-		void* elf_bss = (void*)(it->p_vaddr + it->p_filesz);
-		size_t size = MEM_OFFSET(elf_bss, PAGE_SIZE);
-		if(!size) {
-			// The mapped region is assigned just as filesz, so there's no space for .bss section. 
-			// Map .bss section explicitly
-			void* mapped_bss = mmap(elf_bss, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_FIXED, -1, 0);
-			assert(mapped_bss != MAP_FAILED);
-		}
-		size = PAGE_SIZE - size;
-		memset((void*)elf_bss, 0, size);
-		DEBUG("Clear bits!\n");
-	}
+	memset(bss, 0, bss_size);
 
 	memory_usage += it->p_filesz;
-	fprintf(stderr, "Virtual address: %p, file offset: %u, file_size: %lu, total memory usage: %llu B\n", mapped, file_offset, it->p_filesz, memory_usage);
+	fprintf(stderr, "Virtual address: [%p, %p), file offset: %u, total memory usage: %llu B\n", mapped, mapped + len, file_offset, memory_usage);
 	return mapped;
 }
 
@@ -220,49 +207,88 @@ static uint64_t make_stack(const Info info) {
 	{
 		const char** it = info.envp;
 		while(*it++ != NULL);
-		envc = it - info.envp - 1;	// Exclude NULL
-	}
-
-	if( (1 + (info.argc + 1) + (envc + 1)) * 8 & 0xfULL) {
-		// Needs stack allocation to 16bytes
-		sp -= 8;
+		envc = it - info.envp - 2;	// envc doesn't count last NULL
 	}
 
 	{	// copy auxv to stack
-#define NEW_AUX_ENT(ID, VAL)	do { *--auxv = VAL; *--auxv = ID; } while(0)
-		uint64_t* auxv = sp;
 
-		NEW_AUX_ENT(AT_NULL, 0);
-		NEW_AUX_ENT(AT_EXECFD, info.fd);
-		NEW_AUX_ENT(AT_NOTELF, 0);
-		NEW_AUX_ENT(AT_EGID, getegid());
-		NEW_AUX_ENT(AT_GID, getgid());
-		NEW_AUX_ENT(AT_EUID, geteuid());
-		NEW_AUX_ENT(AT_UID, getuid());
-		NEW_AUX_ENT(AT_ENTRY, info.elf_hdr.e_entry);
-		NEW_AUX_ENT(AT_BASE, info.base_addr);
-		NEW_AUX_ENT(AT_PHNUM, info.elf_hdr.e_phnum);
-		NEW_AUX_ENT(AT_PHENT, info.elf_hdr.e_phentsize);
-		NEW_AUX_ENT(AT_PHDR, info.base_addr + info.elf_hdr.e_phoff);
-		NEW_AUX_ENT(AT_PAGESZ, PAGE_SIZE);
+		DEBUG("################ CHANGE AUXV ##################\n");
+		Elf64_auxv_t* auxv = info.envp + envc + 1;
+		Elf64_auxv_t *it = auxv;
+		size_t auxc;	// Includes AT_NULL element
+		
+		for(it = auxv, auxc = 1; it->a_type != AT_NULL ; ++it, ++auxc) {
+			DEBUG("#%ld: type: %lu, value: %lu\n",it - auxv, it->a_type, it->a_un.a_val);
+			switch(it->a_type) {
+				case AT_EXECFN:
+					it->a_un.a_val = info.argv[0];
+					break;
+				case AT_EXECFD:
+					it->a_un.a_val = info.fd;
+					break;
+				case AT_ENTRY:
+					it->a_un.a_val = info.elf_hdr.e_entry;
+					break;
+				case AT_BASE:
+					it->a_un.a_val = info.base_addr;
+					break;
+				case AT_PHNUM:
+					it->a_un.a_val = info.elf_hdr.e_phnum;
+					break;
+				case AT_PHENT:
+					it->a_un.a_val = info.elf_hdr.e_phentsize;
+					break;
+				case AT_PHDR:
+					it->a_un.a_val = info.elf_hdr.e_phoff;
+					break;
+			}
+		}
+		DEBUG("#%ld: type: %lu, value: %lu\n",it - auxv, it->a_type, it->a_un.a_val);
 
-#undef NEW_AUX_ENT
+
+		DEBUG("########## auxc: %ld ###########\n", auxc);
+		DEBUG("########## envc: %ld ###########\n", envc);
+
+		sp -= (auxc) * sizeof(Elf64_auxv_t);
+		memmove(sp, auxv, (auxc) * sizeof(Elf64_auxv_t));
+
+#ifndef NDEBUG
+		//DEBUG("&&&&&&&&&&&& STACK VERSION AUXV &&&&&&&&&&&&\n");
+		//for(it = sp; it->a_type != AT_NULL; ++it) {
+		//	DEBUG("#%ld: type: %lu, value: %lu\n",it - (Elf64_auxv_t*)sp, it->a_type, it->a_un.a_val);
+		//}
+		//DEBUG("#%ld: type: %lu, value: %lu\n",it - (Elf64_auxv_t*)sp, it->a_type, it->a_un.a_val);
+#endif
 	}
+
 
 	// copy envp to stack
 	sp -= (envc + 1) * sizeof(char*);
 	memmove(sp, info.envp, (envc + 1) * sizeof(char*));
 
+#ifndef NDEBUG
+	//DEBUG("&&&&&&& environment vector &&&&&&&&\n");
+	//for(char** it = sp; *it; ++it){
+	//	DEBUG("#%d: %s\n",it - (char**)sp, *it);
+	//}
+#endif
+
 	// copy argv to stack
 	sp -= (info.argc + 1) * sizeof(char*);
 	memmove(sp, info.argv, (info.argc + 1) * sizeof(char*));
+
+#ifndef NDEBUG
+	//DEBUG("&&&&&&& argument vector &&&&&&&&\n");
+	//for(char** it = sp; *it; ++it){
+	//	DEBUG("#%d: %s\n",it - (char**)sp, *it);
+	//}
+#endif
 
 	// copy argc to stack
 	sp -= sizeof(info.argc);
 	memmove(sp, &info.argc, sizeof(info.argc));
 
 	DEBUG("SP: %p\n", sp);
-	assert(((uint64_t)sp & 0xfULL) == 0);
 
 	return (uint64_t)sp;
 }
