@@ -18,7 +18,7 @@
 
 enum { STACK_SIZE = PAGE_SIZE * 64ULL, };
 
-typedef struct Auxv_info {
+typedef struct Info {
 		uint64_t fd;
 		Ehdr elf_hdr;
 		uint64_t base_addr;
@@ -26,11 +26,7 @@ typedef struct Auxv_info {
 		uint64_t argc;
 		const char** argv;
 		const char** envp;
-	}Auxv_info;
-
-typedef struct Stk_entry {
-	uint64_t sp, bp;
-} Stk_entry;
+	}Info;
 
 
 static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const it);
@@ -39,12 +35,12 @@ static const Phdr* find_phdr(const Phdr* const table, const size_t len, int item
 static Ehdr* read_elf(const char* const buf);
 static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf);
 static size_t get_size(int fd);
-static Stk_entry make_stack(const Auxv_info info);
+static uint64_t make_stack(const Info info);
 
 static unsigned long long memory_usage;
 
 void my_exec(const int argc, const char* argv[], const char* envp[]) {
-	Auxv_info info = { 
+	Info info = { 
 		.fd = open(argv[0], O_RDWR),
 		.argc = argc,
 		.argv = argv,
@@ -91,33 +87,16 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 	fprintf(stderr, "Base address: %#lx\n", info.base_addr);
 	//fclose(fp);
 
-	Stk_entry stk_e = make_stack(info);
 	uint64_t entry_p = info.elf_hdr.e_entry;
-	uint64_t sp = stk_e.sp;
+	uint64_t sp = make_stack(info);
 
-	DEBUG("base p: %#lx, stk p: %#lx\n", stk_e.bp, stk_e.sp);
+	DEBUG("stk p: %#lx\n", sp);
 	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
 
 	DEBUG("argc: %lu\n", *(uint64_t*)sp);
 	DEBUG("argv[0]: %s\n", *(char**)(sp + sizeof info.argc));
 
 
-	//asm __volatile__(
-	//  "xor %rax, %rax\n\t"
-    //  "xor %rbx, %rbx\n\t"
-    //  "xor %rcx, %rcx\n\t"
-    //  "xor %rdx, %rdx\n\t"
-    //  "xor %rsi, %rsi\n\t"
-    //  "xor %rdi, %rdi\n\t"
-    //  "xor %r8, %r8\n\t"
-    //  "xor %r9, %r9\n\t"
-    //  "xor %r10, %r10\n\t"
-    //  "xor %r11, %r11\n\t"
-    //  "xor %r12, %r12\n\t"
-    //  "xor %r13, %r13\n\t"
-    //  "xor %r14, %r14\n\t"
-    //  "xor %r15, %r15\n\t"
-    // );
 
 	// mov src dst
 	// cf. in x86-64, rbp won't be used as frame pointer
@@ -140,7 +119,7 @@ void my_exec(const int argc, const char* argv[], const char* envp[]) {
 			"xor %%r14, %%r14\n\t"
 			"xor %%r15, %%r15\n\t"
 
-			"jmp %%rbp\n\t"
+			"jmp *%%rbp\n\t"
 			:
 			: "r" (entry_p), "r" (sp)
 			);
@@ -222,64 +201,69 @@ static Elf64_auxv_t* get_auxv(const char* envp[]) {
 	return (Elf64_auxv_t*)p;
 }
 
-static Stk_entry make_stack(const Auxv_info info) {
+static uint64_t make_stack(const Info info) {
 
 	DEBUG("Enter make_stack\n");
 
 	void* sp = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	assert(sp != MAP_FAILED);
+	//memset(sp, 0, STACK_SIZE);
 	memory_usage += STACK_SIZE;
 	fprintf(stderr, "STACK: Virtual address: %p, memory_size: %d, total memory usage: %llu B\n", sp, STACK_SIZE, memory_usage);
 	// According to some sources, MAP_GROWSDOWN is buggy
-	// Check http://lkml.iu.edu/hypermail/linux/kernel/0808.1/2846.html
 
 	sp += STACK_SIZE;
 
 	void* const bp = sp;
 
+	size_t envc;
+	{
+		const char** it = info.envp;
+		while(*it++ != NULL);
+		envc = it - info.envp - 1;	// Exclude NULL
+	}
+
+	if( (1 + (info.argc + 1) + (envc + 1)) * 8 & 0xfULL) {
+		// Needs stack allocation to 16bytes
+		sp -= 8;
+	}
+
 	{	// copy auxv to stack
-#define NEW_AUX_ENT(P, V, ID)	do{	*--P = V; *--P = ID; }while(0);
+#define NEW_AUX_ENT(ID, VAL)	do { *--auxv = VAL; *--auxv = ID; } while(0)
 		uint64_t* auxv = sp;
-		NEW_AUX_ENT(auxv, 0, AT_NULL);
-		NEW_AUX_ENT(auxv, info.fd, AT_EXECFD);
-		NEW_AUX_ENT(auxv, 0, AT_NOTELF);
-		NEW_AUX_ENT(auxv, getegid(), AT_EGID);
-		NEW_AUX_ENT(auxv, getgid(), AT_GID);
-		NEW_AUX_ENT(auxv, geteuid(), AT_EUID);
-		NEW_AUX_ENT(auxv, getuid(), AT_UID);
-		NEW_AUX_ENT(auxv, info.elf_hdr.e_entry, AT_ENTRY);
-		NEW_AUX_ENT(auxv, info.base_addr, AT_BASE);
-		NEW_AUX_ENT(auxv, info.elf_hdr.e_phnum, AT_PHNUM);
-		NEW_AUX_ENT(auxv, info.elf_hdr.e_phentsize, AT_PHENT);
-		NEW_AUX_ENT(auxv, info.base_addr + info.elf_hdr.e_phoff, AT_PHDR);
-		NEW_AUX_ENT(auxv, PAGE_SIZE, AT_PAGESZ);
+
+		NEW_AUX_ENT(AT_NULL, 0);
+		NEW_AUX_ENT(AT_EXECFD, info.fd);
+		NEW_AUX_ENT(AT_NOTELF, 0);
+		NEW_AUX_ENT(AT_EGID, getegid());
+		NEW_AUX_ENT(AT_GID, getgid());
+		NEW_AUX_ENT(AT_EUID, geteuid());
+		NEW_AUX_ENT(AT_UID, getuid());
+		NEW_AUX_ENT(AT_ENTRY, info.elf_hdr.e_entry);
+		NEW_AUX_ENT(AT_BASE, info.base_addr);
+		NEW_AUX_ENT(AT_PHNUM, info.elf_hdr.e_phnum);
+		NEW_AUX_ENT(AT_PHENT, info.elf_hdr.e_phentsize);
+		NEW_AUX_ENT(AT_PHDR, info.base_addr + info.elf_hdr.e_phoff);
+		NEW_AUX_ENT(AT_PAGESZ, PAGE_SIZE);
 
 #undef NEW_AUX_ENT
 	}
-	{	// copy envp to stack
-		const char** it = info.envp;
-		while(*it++ != NULL);
-		size_t sz = (it - info.envp) * sizeof(char*);
 
-		sp -= sz;
-		memmove(sp, info.envp, sz);
-	}
-	{	// copy argv to stack
-		const char** it = info.argv;
-		while(*it++ != NULL);
-		size_t sz = (it - info.argv) * sizeof(char*);
-		sp -= sz;
-		memmove(sp, info.argv, sz);
-	}
-	{	// copy argc to stack
-		sp -= sizeof(info.argc);
-		memmove(sp, &info.argc, sizeof(info.argc));
-	}
-	DEBUG("ARGC1: %lu\n", info.argc);
-	DEBUG("ARGC2: %d\n", *(int*)sp);
-	DEBUG("&ARGC: %p\n", (int*)sp);
-	DEBUG("&ARGC: %p\n", sp);
+	// copy envp to stack
+	sp -= (envc + 1) * sizeof(char*);
+	memmove(sp, info.envp, (envc + 1) * sizeof(char*));
 
-	return (Stk_entry){ .bp = (uint64_t)bp, .sp = (uint64_t)sp };
+	// copy argv to stack
+	sp -= (info.argc + 1) * sizeof(char*);
+	memmove(sp, info.argv, (info.argc + 1) * sizeof(char*));
+
+	// copy argc to stack
+	sp -= sizeof(info.argc);
+	memmove(sp, &info.argc, sizeof(info.argc));
+
+	DEBUG("SP: %p\n", sp);
+	assert(((uint64_t)sp & 0xfULL) == 0);
+
+	return (uint64_t)sp;
 }
 
