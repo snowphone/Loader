@@ -1,3 +1,8 @@
+# Irrelevant source files
+*.i	# preprocessed source codes
+*.s # assembly codes
+*.txt
+
 # Prerequisites
 *.d
 
@@ -35,6 +40,8 @@
 *.i*86
 *.x86_64
 *.hex
+apager
+dpager
 
 # Debug files
 *.dSYM/
