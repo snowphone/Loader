@@ -1,13 +1,21 @@
-TARGET=apager
-OBJS:=$(patsubst %.c, %.o, $(wildcard *.c))
+TARGETS=apager dpager
 CPPFLAGS=
-CFLAGS=-Og -g  -DNDEBUG
+CFLAGS=-O2 -g  -DNDEBUG
+#CFLAGS=-Og -g  
 
-$(TARGET) : $(OBJS)
+all: $(TARGETS)
+
+apager : main.o loader.o
+	$(CC) $^ -o $@
+
+dpager : demand_main.o demand_loader.o
 	$(CC) $^ -o $@
 
 %.o: %.c
 	$(CC) $(CPPFLAGS) $(CFLAGS) -c $<
 
+demand_main.o: main.c
+	$(CC) $(CPPFLAGS) $(CFLAGS) -DDEMAND -o $@ -c $<
+
 clean:
-	$(RM) $(TARGET) $(OBJS) $(patsubst %.c, %.i, $(wildcard *.c))
+	$(RM) $(TARGETS) $(patsubst %.c, %.i, $(wildcard *.c)) $(patsubst %.c, %.o, $(wildcard *.c))

@@ -1,4 +1,8 @@
-#include "loader.h"
+#ifdef DEMAND
+ #include "demand_loader.h"
+#else
+ #include "loader.h"
+#endif
 
 #include "common.h"
 
@@ -16,6 +20,10 @@ int main(int argc, const char* argv[]) {
 	const char** envp = argv;
 	while(*envp++);
 
+#ifdef DEMAND
+	demand_execve(argc - 1, argv + 1, envp);
+#else
 	Execve(argc - 1, argv + 1, envp);
+#endif
 }
 
