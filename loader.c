@@ -41,7 +41,7 @@ static unsigned long long memory_usage;
 
 void Execve(const int argc, const char* argv[], const char* envp[]) {
 	Info info = { 
-		.fd = open(argv[0], O_RDWR),
+		.fd = open(argv[0], O_RDONLY),
 		.argc = argc,
 		.argv = argv,
 		.envp = envp,
@@ -144,24 +144,33 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 	// cf. A segment contains several sections such as .text, .init, and so on.
 	void* const aligned_addr = MEM_ALIGN(it->p_vaddr, PAGE_SIZE);
 	const uint64_t front_pad = MEM_OFFSET(it->p_vaddr, PAGE_SIZE);
-	const size_t len = MEM_CEIL(it->p_memsz + front_pad, PAGE_SIZE);
+	size_t len = MEM_CEIL(it->p_filesz + front_pad, PAGE_SIZE);
 	const int prot = make_prot(it->p_flags);
 	const int flags = elf_hdr->e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
 	const unsigned int file_offset = it->p_offset - front_pad;
 
 	void* const mapped = mmap(aligned_addr, len, prot, flags, fd, file_offset);
-	assert(mapped != MAP_FAILED);
-	assert(mapped == aligned_addr);
+	assert(mapped != MAP_FAILED && mapped == aligned_addr);
 	// Memory is mapped in private mode, so its modification only affects on private copy, not the file. 
 	memset(mapped, 0, front_pad);
 
-	void* const bss = mapped + front_pad + it->p_filesz;
-	const size_t bss_size = it->p_memsz - it->p_filesz;
+	if(it->p_memsz > it->p_filesz) {
+		// .bss section
+		void* bss = it->p_vaddr + it->p_filesz;
+		size_t sz = MEM_CEIL(bss, PAGE_SIZE) - bss;
+		assert(sz >= 0);
+		memset(bss, 0, sz);
 
-	memset(bss, 0, bss_size);
-	DEBUG("BSS: clear [%p, %p)\n", bss, bss + bss_size);
+		bss += sz;
+		sz = (it->p_memsz - it->p_filesz) - sz;
+		void* m = mmap(bss, sz, prot, flags | MAP_ANONYMOUS, -1, 0);
+		assert(m != MAP_FAILED && m == bss);
+		memset(bss, 0, sz);
 
-	memory_usage += it->p_filesz;
+		len += sz;
+	}
+
+	memory_usage += len;
 	fprintf(stderr, "Virtual address: [%p, %p), file offset: %u, total memory usage: %llu B\n", mapped, mapped + len, file_offset, memory_usage);
 	return mapped + front_pad;
 }
@@ -208,7 +217,7 @@ static uint64_t make_stack(const Info info) {
 
 		Auxv_t *it = auxv;
 		size_t auxc;	// Includes AT_NULL element
-		
+
 		for(it = auxv, auxc = 1; it->a_type != AT_NULL ; ++it, ++auxc) {
 			switch(it->a_type) {
 				case AT_EXECFN:
