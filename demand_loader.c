@@ -3,13 +3,15 @@
 #include "common.h"
 #include "dyn_linker.h"
 
+#define __USE_GNU
+
 #include <elf.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
-
 #include <unistd.h>
 #include <fcntl.h>
 #include <signal.h>
+#include <ucontext.h>
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -79,13 +81,16 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 
 #undef READ
 
-	bind_page(info.elf_hdr.e_entry);
+	if(find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
+		assert("Dynamic linker is not yet implemented" && 0);
+	}
+
+	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
 
 	const uint64_t entry_p = info.elf_hdr.e_entry;
 	const uint64_t sp = make_stack(info);
 
 	DEBUG("stk p: %#lx\n", sp);
-	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
 
 	DEBUG("argc: %lu\n", *(uint64_t*)sp);
 	DEBUG("argv[0]: %s\n", *(char**)(sp + sizeof info.argc));
@@ -121,33 +126,39 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 }
 
 static void segv_handler(int signo, siginfo_t* info, void* _context) {
-	static int i = 0;
-	assert(signo == SIGSEGV);
-	const char* dict[] = {
+	static const char* dict[] = {
 		"UNUSED",
 		"SEGV_MAPERR",			/* Address not mapped to object.  */
 		"SEGV_ACCERR",			/* Invalid permissions for mapped object.  */
 		"SEGV_BNDERR",			/* Bounds checking failure.  */
 		"SEGV_PKUERR",			/* Protection key checking failure.  */
 	};
-	DEBUG("si_code: %s\n", dict[info->si_code]);
+	//DEBUG("si_code: %s\n", dict[info->si_code]);
+	assert(signo == SIGSEGV);
+	assert(info->si_code == SEGV_MAPERR);
 	ucontext_t* context = _context;
 
 	const uint64_t fault_addr = (uint64_t)info->si_addr;
 	const short addr_lsb = info->si_addr_lsb;
 
+	if(!fault_addr){
+		void* pc = context->uc_mcontext.gregs[REG_RIP];
+		DEBUG("At %p, fault occured\n", pc);
+		raise(SIGABRT);
+	}
+
 	fprintf(stderr, "Page fault address: %#lx\n", fault_addr);
 	bind_page(fault_addr);
-	i += 1;
-	if(i == 3)
-		raise(SIGABRT);	
 }
 
 static void register_segv() {
 	struct sigaction action;
 	
 	action.sa_sigaction = segv_handler;
+
 	sigemptyset(&action.sa_mask);
+	sigaddset(&action.sa_mask, SIGSEGV);
+
 	action.sa_flags = SA_SIGINFO;
 
 	if(sigaction(SIGSEGV, &action, NULL) < 0) {
@@ -171,13 +182,10 @@ static void bind_page(const uint64_t fault_addr) {
 	int flags = info.elf_hdr.e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
 
 	for(Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
-		if(it->p_type == PT_INTERP) {
-			assert("Dynamic linker is not yet implemented" && 0);
-		}
 
 		const uint64_t begin = it->p_vaddr,
 			  end = it->p_vaddr + it->p_memsz;
-		if(!(begin <= fault_addr && fault_addr < end))
+		if( !(begin <= fault_addr && fault_addr < end) )
 			continue;
 
 
@@ -204,33 +212,9 @@ static void bind_page(const uint64_t fault_addr) {
 		if(flags & MAP_ANONYMOUS) {
 			memset(map_begin, 0, PAGE_SIZE);
 		}
+
+		return;
 	}
-}
-
-static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const it) {
-	// cf. A segment contains several sections such as .text, .init, and so on.
-	void* const aligned_addr = MEM_ALIGN(it->p_vaddr, PAGE_SIZE);
-	const uint64_t front_pad = MEM_OFFSET(it->p_vaddr, PAGE_SIZE);
-	const size_t len = MEM_CEIL(it->p_memsz + front_pad, PAGE_SIZE);
-	const int prot = make_prot(it->p_flags);
-	const int flags = elf_hdr->e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
-	const unsigned int file_offset = it->p_offset - front_pad;
-
-	void* const mapped = mmap(aligned_addr, len, prot, flags, fd, file_offset);
-	assert(mapped != MAP_FAILED);
-	assert(mapped == aligned_addr);
-	// Memory is mapped in private mode, so its modification only affects on private copy, not the file. 
-	memset(mapped, 0, front_pad);
-
-	void* const bss = mapped + front_pad + it->p_filesz;
-	const size_t bss_size = it->p_memsz - it->p_filesz;
-
-	memset(bss, 0, bss_size);
-	DEBUG("BSS: clear [%p, %p)\n", bss, bss + bss_size);
-
-	memory_usage += it->p_filesz;
-	fprintf(stderr, "Virtual address: [%p, %p), file offset: %u, total memory usage: %llu B\n", mapped, mapped + len, file_offset, memory_usage);
-	return mapped + front_pad;
 }
 
 static int make_prot(const int p_flags) {
