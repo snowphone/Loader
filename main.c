@@ -13,7 +13,7 @@
 int main(int argc, const char* argv[]) {
 
 	if(argc == 1) {
-		fprintf(stderr, "Usage: %s <program>, [...]", argv[0]);
+		fprintf(stderr, "Usage: %s <program>, [...]\n", argv[0]);
 		exit(1);
 	}
 
