@@ -44,8 +44,9 @@ static void bind_page(const uint64_t fault_addr);
 
 static Info info;
 
-#define MMAP(...) (assert(MAP_FAILED != mmap(__VA_ARGS__)))
-#define READ(FD, BUF, SZ) assert(read(FD, BUF, SZ) >= 0)
+#define Mmap(...)			assert(MAP_FAILED != mmap(__VA_ARGS__))
+#define Read(FD, BUF, SZ)	assert(read(FD, BUF, SZ) >= 0)
+#define Sigaction(...)	assert(sigaction(__VA_ARGS__) != -1)
 
 void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 	install_segv_handler();
@@ -67,7 +68,7 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 	lseek(info.fd, 0, SEEK_SET);
 
 
-	READ(info.fd, &info.elf_hdr, sizeof(info.elf_hdr));
+	Read(info.fd, &info.elf_hdr, sizeof(info.elf_hdr));
 
 	assert( memcmp(info.elf_hdr.e_ident, ELFMAG, SELFMAG) == 0);
 	assert( info.elf_hdr.e_ident[EI_CLASS] == ELFCLASS64);
@@ -80,10 +81,9 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 	info.p_tab = malloc(p_tab_sz);
 
 	lseek(info.fd, info.elf_hdr.e_phoff, SEEK_SET);
-	READ(info.fd, info.p_tab, p_tab_sz);
+	Read(info.fd, info.p_tab, p_tab_sz);
 
 	info.base_addr = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
-	fprintf(stderr, "Base address: %#lx\n", info.base_addr);
 
 	if (find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
 		assert("Dynamic linker is not yet implemented" && 0);
@@ -131,19 +131,22 @@ static void segv_handler(int signo, siginfo_t* sinfo, void* /* ucontext_t* */ _c
 
 	const uint64_t faulty_addr = (uint64_t)sinfo->si_addr;
 
-	if (!faulty_addr) {
-		perror("NULL pointer can not be referenced");
-		raise(SIGKILL);
+	if (faulty_addr) {
+		bind_page(faulty_addr);
+	} else {
+		// If faulty_addr is NULL, release the handler and let it crash.
+		struct sigaction sa;
+		sa.sa_handler = SIG_DFL;
+		sigemptyset(&sa.sa_mask);
+		sa.sa_flags = 0;
+
+		Sigaction(SIGSEGV, &sa, NULL);
 	}
-
-	//DEBUG("Got signal %d, faulty address is %p from %p\n", signo, faulty_addr, uc->uc_mcontext.gregs[REG_RIP]);
-
-	bind_page(faulty_addr);
 }
 
 static void install_segv_handler() {
 	struct sigaction sa;
-	
+
 	sa.sa_sigaction = segv_handler;
 
 	sigemptyset(&sa.sa_mask);
@@ -151,10 +154,7 @@ static void install_segv_handler() {
 
 	sa.sa_flags = SA_SIGINFO;
 
-	if (sigaction(SIGSEGV, &sa, NULL) < 0) {
-		perror("Failed to register SIGSEGV handler");
-		exit(1);
-	}
+	Sigaction(SIGSEGV, &sa, NULL);
 }
 
 static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
@@ -193,7 +193,7 @@ static void bind_page(const uint64_t fault_addr) {
 				// ∴ offset_in_file := segment_offset_in_file + needy_addr - v_addr
 				file_offset = it->p_offset + aligned_begin - it->p_vaddr;
 			}
-			MMAP((void*)aligned_begin, PAGE_SIZE, prot, flags, fd, file_offset);
+			Mmap((void*)aligned_begin, PAGE_SIZE, prot, flags, fd, file_offset);
 
 			const size_t bss_begin = it->p_vaddr + it->p_filesz,
 				  aligned_end = aligned_begin + PAGE_SIZE;
