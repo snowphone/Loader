@@ -42,7 +42,7 @@ typedef Elf64_auxv_t Auxv_t;
 	#define PAGE_SIZE (getpagesize())	//included in POSIX
 #endif
 
-#define MEM_ALIGN(M/*memory*/, U/*page unit*/) (void*)((uint64_t)(M) & ~((uint64_t)(U) - 1ull))
+#define MEM_ALIGN(M/*memory*/, U/*page unit*/) ((uint64_t)(M) & ~((uint64_t)(U) - 1ull))
 #define MEM_OFFSET(M, U) ((uint64_t)(M) & ((uint64_t)(U) - 1ull))
 #define MEM_CEIL(M, U) ( MEM_OFFSET(M, U) ? (uint64_t)MEM_ALIGN(M, U) + U : M )
 

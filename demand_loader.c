@@ -39,14 +39,16 @@ static Ehdr* read_elf(const char* const buf);
 static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf);
 static size_t get_size(int fd);
 static uint64_t make_stack(const Info info);
-static void register_segv();
+static void install_segv_handler();
 static void bind_page(const uint64_t fault_addr);
 
 static unsigned long long memory_usage;
 static Info info;
 
+#define Mmap(...) (assert(MAP_FAILED != mmap(__VA_ARGS__)))
+
 void demand_execve(const int argc, const char* argv[], const char* envp[]) {
-	register_segv();
+	install_segv_handler();
 
 	info = (Info) { 
 		.fd = open(argv[0], O_RDONLY),
@@ -70,7 +72,7 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
 
 	// Read program header table
-	size_t p_tab_sz = info.elf_hdr.e_phentsize * info.elf_hdr.e_phnum;
+	const size_t p_tab_sz = info.elf_hdr.e_phentsize * info.elf_hdr.e_phnum;
 	info.p_tab = malloc(p_tab_sz);
 
 	lseek(info.fd, info.elf_hdr.e_phoff, SEEK_SET);
@@ -81,7 +83,7 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 
 #undef READ
 
-	if(find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
+	if (find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
 		assert("Dynamic linker is not yet implemented" && 0);
 	}
 
@@ -91,10 +93,6 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 	const uint64_t sp = make_stack(info);
 
 	DEBUG("stk p: %#lx\n", sp);
-
-	DEBUG("argc: %lu\n", *(uint64_t*)sp);
-	DEBUG("argv[0]: %s\n", *(char**)(sp + sizeof info.argc));
-
 
 	fputs("==================== End of Loader ====================\n", stderr);
 
@@ -125,45 +123,35 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 			);
 }
 
-static void segv_handler(int signo, siginfo_t* info, void* _context) {
-	static const char* dict[] = {
-		"UNUSED",
-		"SEGV_MAPERR",			/* Address not mapped to object.  */
-		"SEGV_ACCERR",			/* Invalid permissions for mapped object.  */
-		"SEGV_BNDERR",			/* Bounds checking failure.  */
-		"SEGV_PKUERR",			/* Protection key checking failure.  */
-	};
-	//DEBUG("si_code: %s\n", dict[info->si_code]);
+static void segv_handler(int signo, siginfo_t* sinfo, void* /* ucontext_t* */ _context) {
 	assert(signo == SIGSEGV);
-	assert(info->si_code == SEGV_MAPERR);
-	ucontext_t* context = _context;
+	assert(sinfo->si_code == SEGV_MAPERR);
 
-	const uint64_t fault_addr = (uint64_t)info->si_addr;
-	const short addr_lsb = info->si_addr_lsb;
+	const uint64_t faulty_addr = (uint64_t)sinfo->si_addr;
 
-	if(!fault_addr){
-		void* pc = context->uc_mcontext.gregs[REG_RIP];
-		DEBUG("At %p, fault occured\n", pc);
-		raise(SIGABRT);
+	if (!faulty_addr) {
+		perror("NULL pointer can not be referenced");
+		raise(SIGKILL);
 	}
 
-	fprintf(stderr, "Page fault address: %#lx\n", fault_addr);
-	bind_page(fault_addr);
+	//DEBUG("Got signal %d, faulty address is %p from %p\n", signo, faulty_addr, uc->uc_mcontext.gregs[REG_RIP]);
+
+	bind_page(faulty_addr);
 }
 
-static void register_segv() {
-	struct sigaction action;
+static void install_segv_handler() {
+	struct sigaction sa;
 	
-	action.sa_sigaction = segv_handler;
+	sa.sa_sigaction = segv_handler;
 
-	sigemptyset(&action.sa_mask);
-	sigaddset(&action.sa_mask, SIGSEGV);
+	sigemptyset(&sa.sa_mask);
+	sigaddset(&sa.sa_mask, SIGSEGV);
 
-	action.sa_flags = SA_SIGINFO;
+	sa.sa_flags = SA_SIGINFO;
 
-	if(sigaction(SIGSEGV, &action, NULL) < 0) {
+	if (sigaction(SIGSEGV, &sa, NULL) < 0) {
 		perror("Failed to register SIGSEGV handler");
-		raise(SIGABRT);
+		exit(1);
 	}
 }
 
@@ -181,39 +169,48 @@ static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 static void bind_page(const uint64_t fault_addr) {
 	int flags = info.elf_hdr.e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
 
-	for(Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
-
+	for (Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
 		const uint64_t begin = it->p_vaddr,
 			  end = it->p_vaddr + it->p_memsz;
-		if( !(begin <= fault_addr && fault_addr < end) )
-			continue;
 
+		if ( begin <= fault_addr && fault_addr < end ) {
+			uint64_t aligned_begin = MEM_ALIGN(fault_addr, PAGE_SIZE);
+			const int prot = make_prot(it->p_flags);
+			size_t file_offset = -1;
+			int fd = 0;
 
-		void* const map_begin = MEM_ALIGN(fault_addr, PAGE_SIZE);
-		const int prot = make_prot(it->p_flags);
-		uint64_t file_offset;
-		int fd;
+			DEBUG("segment end: %#lx\n", begin + it->p_filesz);
 
-		if(it->p_memsz > it->p_filesz && begin + it->p_filesz <= fault_addr) {
-			// .bss section
-			fd = -1;
-			file_offset = 0;
-			flags |= MAP_ANONYMOUS;
-		} else {
-			fd = info.fd;
-			file_offset = (uint64_t)MEM_ALIGN(it->p_offset + (fault_addr - it->p_vaddr), PAGE_SIZE);
+			if (it->p_memsz > it->p_filesz && aligned_begin + it->p_filesz <= fault_addr) {
+				// .bss section
+				fd = -1;
+				file_offset = 0;
+				flags |= MAP_ANONYMOUS;
+			} else {
+				// Invariant: needy_addr - v_addr == offset_in_file - segment_offset_in_file
+				// ∴ offset_in_file := segment_offset_in_file + needy_addr - v_addr
+				fd = info.fd;
+				file_offset = it->p_offset + aligned_begin - it->p_vaddr;
+			}
+			Mmap((void*)aligned_begin, PAGE_SIZE, prot, flags, fd, file_offset);
+
+			memory_usage += PAGE_SIZE;
+			//fprintf(stderr, "Virtual address: [%#lx, %#lx), file offset: %lu, total memory usage: %llu B\n", aligned_begin, aligned_begin + PAGE_SIZE, file_offset, memory_usage);
+
+			if (flags & MAP_ANONYMOUS) {
+				memset((void*)aligned_begin, 0, PAGE_SIZE);
+			}
+			if (aligned_begin < it->p_vaddr) {
+				memset((void*)aligned_begin, 0, it->p_vaddr - aligned_begin);
+			}
+			size_t f_end = it->p_vaddr + it->p_filesz,
+				   aligned_end = aligned_begin + PAGE_SIZE;
+			if (f_end <  aligned_end) {
+				memset((void*)f_end, 0, aligned_end - f_end);
+			}
+
+			break;
 		}
-		void* const mapped = mmap(map_begin, PAGE_SIZE, prot, flags, info.fd, file_offset);
-		assert(map_begin == mapped);
-
-		memory_usage += PAGE_SIZE;
-		fprintf(stderr, "Virtual address: [%p, %p), file offset: %lu, total memory usage: %llu B\n", mapped, mapped + PAGE_SIZE, file_offset, memory_usage);
-
-		if(flags & MAP_ANONYMOUS) {
-			memset(map_begin, 0, PAGE_SIZE);
-		}
-
-		return;
 	}
 }
 
@@ -231,8 +228,8 @@ static int make_prot(const int p_flags) {
 }
 
 static const Phdr* find_phdr(const Phdr* const table, const size_t len, int item) {
-	for(const Phdr* it = table; it != table + len; ++it) {
-		if(it->p_type == item)
+	for (const Phdr* it = table; it != table + len; ++it) {
+		if (it->p_type == item)
 			return it;
 	}
 	return NULL;
@@ -259,8 +256,8 @@ static uint64_t make_stack(const Info info) {
 
 		Auxv_t *it = auxv;
 		size_t auxc;	// Includes AT_NULL element
-		
-		for(it = auxv, auxc = 1; it->a_type != AT_NULL ; ++it, ++auxc) {
+
+		for (it = auxv, auxc = 1; it->a_type != AT_NULL ; ++it, ++auxc) {
 			switch(it->a_type) {
 				case AT_EXECFN:
 					it->a_un.a_val = (uint64_t)info.argv[0];
@@ -272,8 +269,12 @@ static uint64_t make_stack(const Info info) {
 					it->a_un.a_val = info.elf_hdr.e_entry;
 					break;
 				case AT_BASE:
-					it->a_un.a_val = info.base_addr;
+				{
+					// The base address of the dynamic linker.
+					const Phdr* interp = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP);
+					it->a_un.a_val = interp ? interp->p_vaddr : 0;
 					break;
+				}
 				case AT_PHNUM:
 					it->a_un.a_val = info.elf_hdr.e_phnum;
 					break;
