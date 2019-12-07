@@ -166,23 +166,24 @@ static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 	return (Phdr*) (buf + e_hdr->e_phoff);
 }
 
-static void bind_page(const uint64_t fault_addr) {
+static void bind_page(const uint64_t faulty_addr) {
 	int flags = info.elf_hdr.e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
 
 	for (Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
-		const uint64_t begin = it->p_vaddr,
-			  end = it->p_vaddr + it->p_memsz;
+		const uint64_t seg_begin = it->p_vaddr,
+			  seg_end = it->p_vaddr + it->p_memsz,
 
-		if ( begin <= fault_addr && fault_addr < end ) {
-			uint64_t aligned_begin = MEM_ALIGN(fault_addr, PAGE_SIZE);
-			const int prot = make_prot(it->p_flags);
-			size_t file_offset = -1;
-			int fd = 0;
+			  aligned_begin = MEM_ALIGN(faulty_addr, PAGE_SIZE),
+			  bss_begin = it->p_vaddr + it->p_filesz,
+			  aligned_end = aligned_begin + PAGE_SIZE;
 
-			DEBUG("segment end: %#lx\n", begin + it->p_filesz);
+		const int prot = make_prot(it->p_flags);
+		size_t file_offset = 0;
+		int fd = 0;
 
+		if ( seg_begin <= faulty_addr && faulty_addr < seg_end ) {
 			// Check whether the whole page is aligned to .bss section.
-			if (it->p_memsz > it->p_filesz && end <= aligned_begin) {
+			if (it->p_memsz > it->p_filesz && bss_begin <= aligned_begin) {
 				// .bss section
 				fd = -1;
 				file_offset = 0;
@@ -195,12 +196,11 @@ static void bind_page(const uint64_t fault_addr) {
 			}
 			Mmap((void*)aligned_begin, PAGE_SIZE, prot, flags, fd, file_offset);
 
-			const size_t bss_begin = it->p_vaddr + it->p_filesz,
-				  aligned_end = aligned_begin + PAGE_SIZE;
 
 			if (bss_begin <= aligned_begin) {
 				// Pure .bss section. 
 				// Clear whole page to zero.
+				DEBUG("PURE BSS!\n");
 				memset((void*)aligned_begin, 0, PAGE_SIZE);
 			} else { // The page might be contain .bss section or not.
 
