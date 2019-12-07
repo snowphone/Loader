@@ -42,10 +42,10 @@ static uint64_t make_stack(const Info info);
 static void install_segv_handler();
 static void bind_page(const uint64_t fault_addr);
 
-static unsigned long long memory_usage;
 static Info info;
 
-#define Mmap(...) (assert(MAP_FAILED != mmap(__VA_ARGS__)))
+#define MMAP(...) (assert(MAP_FAILED != mmap(__VA_ARGS__)))
+#define READ(FD, BUF, SZ) assert(read(FD, BUF, SZ) >= 0)
 
 void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 	install_segv_handler();
@@ -58,10 +58,14 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 		.base_addr = UINT64_MAX,
 	};
 
+	if(info.fd == -1) {
+		fprintf(stderr, "Open error: failed to open %s\n", argv[0]);
+		exit(1);
+	}
+
 	// Read ELF header
 	lseek(info.fd, 0, SEEK_SET);
 
-#define READ(FD, BUF, SZ) assert(read(FD, BUF, SZ) >= 0)
 
 	READ(info.fd, &info.elf_hdr, sizeof(info.elf_hdr));
 
@@ -80,8 +84,6 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 
 	info.base_addr = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
 	fprintf(stderr, "Base address: %#lx\n", info.base_addr);
-
-#undef READ
 
 	if (find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
 		assert("Dynamic linker is not yet implemented" && 0);
@@ -155,8 +157,6 @@ static void install_segv_handler() {
 	}
 }
 
-
-
 static Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 	assert(e_hdr->e_phentsize == sizeof(Phdr));
 
@@ -181,32 +181,39 @@ static void bind_page(const uint64_t fault_addr) {
 
 			DEBUG("segment end: %#lx\n", begin + it->p_filesz);
 
-			if (it->p_memsz > it->p_filesz && aligned_begin + it->p_filesz <= fault_addr) {
+			// Check whether the whole page is aligned to .bss section.
+			if (it->p_memsz > it->p_filesz && end <= aligned_begin) {
 				// .bss section
 				fd = -1;
 				file_offset = 0;
 				flags |= MAP_ANONYMOUS;
-			} else {
+			} else { // Assume the page is the union of non-.bss and .bss section.
+				fd = info.fd;
 				// Invariant: needy_addr - v_addr == offset_in_file - segment_offset_in_file
 				// ∴ offset_in_file := segment_offset_in_file + needy_addr - v_addr
-				fd = info.fd;
 				file_offset = it->p_offset + aligned_begin - it->p_vaddr;
 			}
-			Mmap((void*)aligned_begin, PAGE_SIZE, prot, flags, fd, file_offset);
+			MMAP((void*)aligned_begin, PAGE_SIZE, prot, flags, fd, file_offset);
 
-			memory_usage += PAGE_SIZE;
-			//fprintf(stderr, "Virtual address: [%#lx, %#lx), file offset: %lu, total memory usage: %llu B\n", aligned_begin, aligned_begin + PAGE_SIZE, file_offset, memory_usage);
+			const size_t bss_begin = it->p_vaddr + it->p_filesz,
+				  aligned_end = aligned_begin + PAGE_SIZE;
 
-			if (flags & MAP_ANONYMOUS) {
+			if (bss_begin <= aligned_begin) {
+				// Pure .bss section. 
+				// Clear whole page to zero.
 				memset((void*)aligned_begin, 0, PAGE_SIZE);
-			}
-			if (aligned_begin < it->p_vaddr) {
-				memset((void*)aligned_begin, 0, it->p_vaddr - aligned_begin);
-			}
-			size_t f_end = it->p_vaddr + it->p_filesz,
-				   aligned_end = aligned_begin + PAGE_SIZE;
-			if (f_end <  aligned_end) {
-				memset((void*)f_end, 0, aligned_end - f_end);
+			} else { // The page might be contain .bss section or not.
+
+				if (aligned_begin < it->p_vaddr) {
+					// Zero-fill the front padding 
+					memset((void*)aligned_begin, 0, it->p_vaddr - aligned_begin);
+				}
+				// The first condition checks the segment has .bss section.
+				// The second condition checks the aligned page and .bss section is overlapped.
+				if (it->p_filesz < it->p_memsz && bss_begin < aligned_end) {
+					// Clear the remaining .bss section to zero.
+					memset((void*)bss_begin, 0, aligned_end - bss_begin);
+				}
 			}
 
 			break;
@@ -245,16 +252,13 @@ static Auxv_t* get_auxv(const char* envp[]) {
 static uint64_t make_stack(const Info info) {
 	void* sp = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 	assert(sp != MAP_FAILED);
-	memory_usage += STACK_SIZE;
-	fprintf(stderr, "STACK: Virtual address: %p, memory_size: %d, total memory usage: %llu B\n", sp, STACK_SIZE, memory_usage);
-	// According to some sources, MAP_GROWSDOWN is buggy
 
 	sp += STACK_SIZE;
 
 	Auxv_t* auxv = get_auxv(info.envp);
 	{	// copy auxv to stack
 
-		Auxv_t *it = auxv;
+		Auxv_t* it = auxv;
 		size_t auxc;	// Includes AT_NULL element
 
 		for (it = auxv, auxc = 1; it->a_type != AT_NULL ; ++it, ++auxc) {
@@ -269,12 +273,12 @@ static uint64_t make_stack(const Info info) {
 					it->a_un.a_val = info.elf_hdr.e_entry;
 					break;
 				case AT_BASE:
-				{
-					// The base address of the dynamic linker.
-					const Phdr* interp = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP);
-					it->a_un.a_val = interp ? interp->p_vaddr : 0;
-					break;
-				}
+					{
+						// The base address of the dynamic linker.
+						const Phdr* interp = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP);
+						it->a_un.a_val = interp ? interp->p_vaddr : 0;
+						break;
+					}
 				case AT_PHNUM:
 					it->a_un.a_val = info.elf_hdr.e_phnum;
 					break;
