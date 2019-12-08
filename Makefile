@@ -5,10 +5,10 @@ CFLAGS=-O2 -g  -DNDEBUG
 
 all: $(TARGETS)
 
-apager : main.o loader.o
+apager : main.o loader.o common.o
 	$(CC) $^ -o $@
 
-dpager : demand_main.o demand_loader.o
+dpager : demand_main.o demand_loader.o common.o
 	$(CC) $^ -o $@
 
 %.o: %.c
