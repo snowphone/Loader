@@ -78,3 +78,5 @@ Auxv_t* get_auxv(const char* envp[]);
 uint64_t make_stack(const Info info);
 
 Info read_elf(int argc, const char* argv[], const char* envp[]);
+
+void install_hooker(Info* info);

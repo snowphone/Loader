@@ -37,6 +37,8 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 
 	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
 
+	install_hooker(&info);
+
 	const uint64_t entry_p = info.elf_hdr.e_entry;
 	const uint64_t sp = make_stack(info);
 
@@ -72,22 +74,23 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 }
 
 static void segv_handler(int signo, siginfo_t* sinfo, void* /* ucontext_t* */ _context) {
-	assert(signo == SIGSEGV);
-	assert(sinfo->si_code == SEGV_MAPERR);
+	struct sigaction sa;
+	if(signo != SIGSEGV || sinfo->si_code != SEGV_MAPERR)
+		goto init_signal;
 
 	const uint64_t faulty_addr = (uint64_t)sinfo->si_addr;
 
-	if (faulty_addr) {
+	if (faulty_addr && faulty_addr >= PAGE_SIZE) {
 		bind_page(faulty_addr);
-	} else {
-		// If faulty_addr is NULL, release the handler and let it crash.
-		struct sigaction sa;
-		sa.sa_handler = SIG_DFL;
-		sigemptyset(&sa.sa_mask);
-		sa.sa_flags = 0;
+		return;
+	} 
+init_signal:
+	// If faulty_addr is NULL, release the handler and let it crash.
+	sa.sa_handler = SIG_DFL;
+	sigemptyset(&sa.sa_mask);
+	sa.sa_flags = 0;
 
-		Sigaction(SIGSEGV, &sa, NULL);
-	}
+	Sigaction(SIGSEGV, &sa, NULL);
 }
 
 static void install_segv_handler() {

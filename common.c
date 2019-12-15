@@ -140,3 +140,78 @@ Info read_elf(int argc, const char* argv[], const char* envp[]) {
 
 	return info;
 }
+
+char* get_strtab(Info* info, Elf64_Shdr* sym_tab) {
+	Elf64_Shdr* hdr = sym_tab + info->elf_hdr.e_shstrndx - 1;
+	size_t sz = hdr->sh_size;
+	char* buf = malloc(sz);
+	lseek(info->fd, hdr->sh_offset, SEEK_SET);
+	Read(info->fd, buf, sz);
+	return buf;
+}
+
+static void* find_exit_symbol(Info* info) {
+	size_t sym_hdr_sz = info->elf_hdr.e_shnum * info->elf_hdr.e_shentsize;
+	lseek(info->fd, info->elf_hdr.e_shoff, SEEK_SET);
+	Elf64_Shdr* sym_hdr = malloc(sym_hdr_sz);
+	Read(info->fd, sym_hdr, sym_hdr_sz);
+
+	char* symbol_names = get_strtab(info, sym_hdr);
+
+	void* addr = 0;
+
+	for(Elf64_Shdr* it = sym_hdr; it != sym_hdr + info->elf_hdr.e_shnum; ++it) {
+		if(it->sh_type != SHT_SYMTAB)
+			continue;
+
+		size_t sym_sz = it->sh_size * it->sh_entsize;
+		Elf64_Sym* sym = malloc(sym_sz);
+		lseek(info->fd, it->sh_offset, SEEK_SET);
+		Read(info->fd, sym, sym_sz);
+
+
+		for(Elf64_Sym* jt = sym; jt != sym + it->sh_size; ++jt) {
+			if(jt->st_info & STT_OBJECT && jt->st_info & STB_GLOBAL) {
+				if(jt->st_name == SHN_UNDEF) // str name is not encoded
+					continue;
+				char* name = symbol_names + jt->st_name;
+				if(strcmp(name, "__exit_funcs") != 0) 
+					continue;
+				addr = (void*)jt->st_value;
+				goto found_address;
+			}
+		}
+	}
+found_address:
+	return addr;
+}
+
+void fin() {
+	fputs("==================== Back to Loader ===================\n", stderr);
+}
+
+#define PTR_MANGLE(var) 			\
+	asm ("mov %0, %%r10\n\t"		\
+		"xor %%fs:0x30, %%r10\n\t"	\
+		"rol $0x11, %%r10\n\t"		\
+		"mov %%r10, %0\n\t"			\
+		:"+r" (var)					\
+		)
+
+void install_hooker(Info* info) {
+	void** target_symbol_addr = find_exit_symbol(info);
+	uint64_t* list = *target_symbol_addr;
+
+	uint64_t func_addr = (uint64_t)fin;
+	PTR_MANGLE(func_addr);
+
+	list[0] = (uint64_t)NULL;
+	list[1] = 1;
+	list[2] = 4;
+	list[3] = func_addr;
+	list[4] = 0;
+	list[5] = 0; //dso_handle == *(void**)0x6b90e8. mostly, assigned to 0
+
+	DEBUG("function address: %p, mangled address: %#lx\n", fin, func_addr);
+}
+
