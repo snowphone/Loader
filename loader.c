@@ -40,6 +40,8 @@ void Execve(const int argc, const char* argv[], const char* envp[]) {
 
 	fprintf(stderr, "Base address: %#lx\n", info.base_addr);
 
+	install_hooker(&info);
+
 	const uint64_t entry_p = info.elf_hdr.e_entry;
 	const uint64_t sp = make_stack(info);
 
