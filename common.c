@@ -1,6 +1,7 @@
 #include "common.h"
 
 unsigned long long memory_usage = 0ULL;
+Array* mmap_list = NULL;
 
 Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 	assert(e_hdr->e_phentsize == sizeof(Phdr));
@@ -64,12 +65,12 @@ uint64_t make_stack(const Info info) {
 					it->a_un.a_val = info.elf_hdr.e_entry;
 					break;
 				case AT_BASE:
-					{
-						// The base address of the dynamic linker.
-						const Phdr* interp = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP);
-						it->a_un.a_val = interp ? interp->p_vaddr : 0;
-						break;
-					}
+				{
+					// The base address of the dynamic linker.
+					const Phdr* interp = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP);
+					it->a_un.a_val = interp ? interp->p_vaddr : 0;
+					break;
+				}
 				case AT_PHNUM:
 					it->a_un.a_val = info.elf_hdr.e_phnum;
 					break;
@@ -108,6 +109,7 @@ uint64_t make_stack(const Info info) {
 
 	return (uint64_t)sp;
 }
+
 Info read_elf(int argc, const char* argv[], const char* envp[]) {
 	Info info = { 
 		.fd = open(argv[0], O_RDONLY),
@@ -160,14 +162,15 @@ static void* find_exit_symbol(Info* info) {
 
 	char* symbol_names = get_strtab(info, sym_hdr);
 
-	void* addr = 0;
+	void* addr = NULL;
+	Elf64_Sym* sym = NULL;
 
 	for(Elf64_Shdr* it = sym_hdr; it != sym_hdr + info->elf_hdr.e_shnum; ++it) {
 		if(it->sh_type != SHT_SYMTAB)
 			continue;
 
 		size_t sym_sz = it->sh_size * it->sh_entsize;
-		Elf64_Sym* sym = malloc(sym_sz);
+		sym = malloc(sym_sz);
 		lseek(info->fd, it->sh_offset, SEEK_SET);
 		Read(info->fd, sym, sym_sz);
 
@@ -185,12 +188,16 @@ static void* find_exit_symbol(Info* info) {
 		}
 	}
 found_address:
+	free(sym_hdr);
+	free(symbol_names);
+	free(sym);
 	return addr;
 }
 
-static void hooker() {
+static void catcher() {
 	fputs("==================== Back to Loader ===================\n", stderr);
 	fprintf(stderr, "Total memory usage: %#llx\n", memory_usage);
+
 }
 
 #define PTR_MANGLE(var) 			\
@@ -205,17 +212,17 @@ void install_catcher(Info* info) {
 	void** target_symbol_addr = find_exit_symbol(info);
 	uint64_t* list = *target_symbol_addr;
 
-	uint64_t func_addr = (uint64_t)hooker;
+	uint64_t func_addr = (uint64_t)catcher;
 	PTR_MANGLE(func_addr);
 
 	list[0] = (uint64_t)NULL;
-	list[1] = 1;
-	list[2] = 4;
+	list[1] = 1;	// index
+	list[2] = 4;	// flavor: ef_cxa
 	list[3] = func_addr;
-	list[4] = 0;
-	list[5] = 0; //dso_handle == *(void**)0x6b90e8. mostly, assigned to 0
+	list[4] = (uint64_t)NULL;	// arg
+	list[5] = (uint64_t)NULL; 	//dso_handle == *(void**)0x6b90e8. mostly, assigned to 0
 
-	DEBUG("function address: %p, mangled address: %#lx\n", hooker, func_addr);
+	DEBUG("function address: %p, mangled address: %#lx\n", catcher, func_addr);
 }
 
 void Read(int fd, void* buf, ssize_t sz) {
@@ -235,5 +242,17 @@ void Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset)
 	void* ret = mmap(start, length, prot, flags, fd, offset);
 	assert(ret != MAP_FAILED);
 	memory_usage += MEM_CEIL(length, PAGE_SIZE);
+
+	if(!mmap_list) {
+		mmap_list = malloc(sizeof *mmap_list + 8 * sizeof(Pair));
+		mmap_list->capacity = 8;
+		mmap_list->idx = 0;
+	} else if(mmap_list->idx == mmap_list->capacity) {
+		size_t new_sz = sizeof *mmap_list + mmap_list->capacity * 2 * sizeof(Pair);
+		mmap_list = realloc(mmap_list, new_sz);
+		mmap_list->capacity *= 2;
+	}
+
+	mmap_list->list[mmap_list->idx++] = (Pair) { .ptr = ret, .len = length };
 }
 

@@ -65,6 +65,19 @@ typedef struct Info {
 
 extern unsigned long long memory_usage;
 
+typedef struct {
+	void* ptr;
+	uint64_t len;
+} Pair;
+
+typedef struct {
+	size_t capacity;
+	size_t idx;
+	Pair list[];
+} Array;
+
+extern Array* mmap_list;
+
 Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf);
 
 int make_prot(const int p_flags);
