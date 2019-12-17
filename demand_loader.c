@@ -25,6 +25,7 @@ static void bind_page(const uint64_t fault_addr);
 static Info info;
 
 void demand_execve(const int argc, const char* argv[], const char* envp[]) {
+	memory_usage = 0;
 	install_segv_handler();
 
 	info = read_elf(argc, argv, envp);
@@ -37,7 +38,7 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 
 	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
 
-	install_hooker(&info);
+	install_catcher(&info);
 
 	const uint64_t entry_p = info.elf_hdr.e_entry;
 	const uint64_t sp = make_stack(info);
@@ -45,32 +46,7 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 	DEBUG("stk p: %#lx\n", sp);
 
 	fputs("==================== End of Loader ====================\n", stderr);
-
-	// mov src dst
-	// cf. in x86-64, rbp won't be used as a frame pointer
-	asm __volatile__(
-			"movq %1, %%rsp\n\t"
-			"movq %0, %%rbp\n\t"
-
-			"xor %%rax, %%rax\n\t"
-			"xor %%rbx, %%rbx\n\t"
-			"xor %%rcx, %%rcx\n\t"
-			"xor %%rdx, %%rdx\n\t"
-			"xor %%rsi, %%rsi\n\t"
-			"xor %%rdi, %%rdi\n\t"
-			"xor %%r8, %%r8\n\t"
-			"xor %%r9, %%r9\n\t"
-			"xor %%r10, %%r10\n\t"
-			"xor %%r11, %%r11\n\t"
-			"xor %%r12, %%r12\n\t"
-			"xor %%r13, %%r13\n\t"
-			"xor %%r14, %%r14\n\t"
-			"xor %%r15, %%r15\n\t"
-
-			"jmp *%%rbp\n\t"
-			:
-			: "r" (entry_p), "r" (sp)
-			);
+	JUMP(entry_p, sp);
 }
 
 static void segv_handler(int signo, siginfo_t* sinfo, void* /* ucontext_t* */ _context) {
