@@ -1,7 +1,7 @@
 TARGETS=apager dpager
 CPPFLAGS=
-CFLAGS=-O2 -g  -DNDEBUG
-#CFLAGS=-Og -g  
+CFLAGS=-O2 -g  -DNDEBUG	-std=gnu99
+#CFLAGS=-Og -g  -std=gnu99
 
 all: $(TARGETS)
 

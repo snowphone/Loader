@@ -17,9 +17,9 @@
 
 static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const it);
 
-static unsigned long long memory_usage;
 
 void Execve(const int argc, const char* argv[], const char* envp[]) {
+	memory_usage = 0;
 	Info info = read_elf(argc, argv, envp);
 
 	DEBUG("# of segments: %d\n", info.elf_hdr.e_phnum);
@@ -40,7 +40,7 @@ void Execve(const int argc, const char* argv[], const char* envp[]) {
 
 	fprintf(stderr, "Base address: %#lx\n", info.base_addr);
 
-	install_hooker(&info);
+	install_catcher(&info);
 
 	const uint64_t entry_p = info.elf_hdr.e_entry;
 	const uint64_t sp = make_stack(info);
@@ -54,31 +54,7 @@ void Execve(const int argc, const char* argv[], const char* envp[]) {
 
 	fputs("==================== End of Loader ====================\n", stderr);
 
-	// mov src dst
-	// cf. in x86-64, rbp won't be used as frame pointer
-	asm __volatile__(
-			"movq %1, %%rsp\n\t"
-			"movq %0, %%rbp\n\t"
-
-			"xor %%rax, %%rax\n\t"
-			"xor %%rbx, %%rbx\n\t"
-			"xor %%rcx, %%rcx\n\t"
-			"xor %%rdx, %%rdx\n\t"
-			"xor %%rsi, %%rsi\n\t"
-			"xor %%rdi, %%rdi\n\t"
-			"xor %%r8, %%r8\n\t"
-			"xor %%r9, %%r9\n\t"
-			"xor %%r10, %%r10\n\t"
-			"xor %%r11, %%r11\n\t"
-			"xor %%r12, %%r12\n\t"
-			"xor %%r13, %%r13\n\t"
-			"xor %%r14, %%r14\n\t"
-			"xor %%r15, %%r15\n\t"
-
-			"jmp *%%rbp\n\t"
-			:
-			: "r" (entry_p), "r" (sp)
-			);
+	JUMP(entry_p, sp);
 }
 
 static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const it) {
@@ -108,7 +84,6 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 		len += sz;
 	}
 
-	memory_usage += len;
 	fprintf(stderr, "Virtual address: [%p, %p), file offset: %u, total memory usage: %llu B\n", aligned_begin, aligned_begin + len, file_offset, memory_usage);
 	return aligned_begin + front_pad;
 }

@@ -49,10 +49,7 @@ typedef Elf64_auxv_t Auxv_t;
 
 
 // Wrapper functions that guarantee to do well
-#define Mmap(...)			assert(MAP_FAILED != mmap(__VA_ARGS__))
-#define Read(FD, BUF, SZ)	assert(read(FD, BUF, SZ) >= 0)
 #define Sigaction(...)	assert(sigaction(__VA_ARGS__) != -1)
-
 
 enum { STACK_SIZE = PAGE_SIZE * 64ULL, };
 
@@ -66,6 +63,7 @@ typedef struct Info {
 	const char** envp;
 }Info;
 
+extern unsigned long long memory_usage;
 
 Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf);
 
@@ -79,4 +77,37 @@ uint64_t make_stack(const Info info);
 
 Info read_elf(int argc, const char* argv[], const char* envp[]);
 
-void install_hooker(Info* info);
+void install_catcher(Info* info);
+
+void Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset);
+
+void Read(int fd, void* buf, ssize_t sz);
+
+// mov src dst
+// cf. in x86-64, rbp won't be used as a frame pointer
+#define JUMP(entry, stack)				\
+	asm __volatile__(					\
+			"movq %1, %%rsp\n\t"		\
+			"movq %0, %%rbp\n\t"		\
+										\
+			"xor %%rax, %%rax\n\t"		\
+			"xor %%rbx, %%rbx\n\t"		\
+			"xor %%rcx, %%rcx\n\t"		\
+			"xor %%rdx, %%rdx\n\t"		\
+			"xor %%rsi, %%rsi\n\t"		\
+			"xor %%rdi, %%rdi\n\t"		\
+			"xor %%r8, %%r8\n\t"		\
+			"xor %%r9, %%r9\n\t"		\
+			"xor %%r10, %%r10\n\t"		\
+			"xor %%r11, %%r11\n\t"		\
+			"xor %%r12, %%r12\n\t"		\
+			"xor %%r13, %%r13\n\t"		\
+			"xor %%r14, %%r14\n\t"		\
+			"xor %%r15, %%r15\n\t"		\
+										\
+			"jmp *%%rbp\n\t"			\
+			:							\
+			: "r" (entry), "r" (stack)	\
+			)
+
+

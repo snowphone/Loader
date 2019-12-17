@@ -1,5 +1,7 @@
 #include "common.h"
 
+unsigned long long memory_usage = 0ULL;
+
 Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 	assert(e_hdr->e_phentsize == sizeof(Phdr));
 
@@ -186,8 +188,9 @@ found_address:
 	return addr;
 }
 
-void fin() {
+static void hooker() {
 	fputs("==================== Back to Loader ===================\n", stderr);
+	fprintf(stderr, "Total memory usage: %#llx\n", memory_usage);
 }
 
 #define PTR_MANGLE(var) 			\
@@ -198,11 +201,11 @@ void fin() {
 		:"+r" (var)					\
 		)
 
-void install_hooker(Info* info) {
+void install_catcher(Info* info) {
 	void** target_symbol_addr = find_exit_symbol(info);
 	uint64_t* list = *target_symbol_addr;
 
-	uint64_t func_addr = (uint64_t)fin;
+	uint64_t func_addr = (uint64_t)hooker;
 	PTR_MANGLE(func_addr);
 
 	list[0] = (uint64_t)NULL;
@@ -212,6 +215,25 @@ void install_hooker(Info* info) {
 	list[4] = 0;
 	list[5] = 0; //dso_handle == *(void**)0x6b90e8. mostly, assigned to 0
 
-	DEBUG("function address: %p, mangled address: %#lx\n", fin, func_addr);
+	DEBUG("function address: %p, mangled address: %#lx\n", hooker, func_addr);
+}
+
+void Read(int fd, void* buf, ssize_t sz) {
+	while(sz > 0) {
+		ssize_t readn = read(fd, buf, sz);
+		assert(readn >= 0);
+		if(readn == 0) {
+			break; 
+		} else {
+			sz -= readn;
+			buf += readn;
+		}
+	}
+}
+
+void Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset) {
+	void* ret = mmap(start, length, prot, flags, fd, offset);
+	assert(ret != MAP_FAILED);
+	memory_usage += MEM_CEIL(length, PAGE_SIZE);
 }
 
