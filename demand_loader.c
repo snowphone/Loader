@@ -35,17 +35,13 @@ void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 		assert("Dynamic linker is not yet implemented" && 0);
 	}
 
-	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
+	bind_page(info.elf_hdr.e_entry);
 
-	install_catcher(&info);
+	switch_context(info);
 
-	const uint64_t entry_p = info.elf_hdr.e_entry;
-	const uint64_t sp = make_stack(info);
+	release_memory();
 
-	DEBUG("stk p: %#lx\n", sp);
-
-	fputs("==================== End of Loader ====================\n", stderr);
-	JUMP(entry_p, sp);
+	return;
 }
 
 static void segv_handler(int signo, siginfo_t* sinfo, void* /* ucontext_t* */ _context) {
@@ -115,7 +111,6 @@ static void bind_page(const uint64_t faulty_addr) {
 			if (bss_begin <= aligned_begin) {
 				// Pure .bss section. 
 				// Clear whole page to zero.
-				DEBUG("PURE BSS!\n");
 				memset((void*)aligned_begin, 0, PAGE_SIZE);
 			} else { // The page might be contain .bss section or not.
 
