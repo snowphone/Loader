@@ -22,7 +22,6 @@
 static void install_segv_handler();
 static void bind_page(const uint64_t fault_addr);
 
-static Info info;
 
 void demand_execve(const int argc, const char* argv[], const char* envp[]) {
 	memory_usage = 0;

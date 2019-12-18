@@ -3,6 +3,15 @@
 unsigned long long memory_usage = 0ULL;
 Array* mmap_list = NULL;
 
+Info info = {
+	.fd = 0,
+	.base_addr = 0,
+	.p_tab = NULL,
+	.argc = 0,
+	.argv = NULL,
+	.envp = NULL
+};
+
 Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
 	assert(e_hdr->e_phentsize == sizeof(Phdr));
 
@@ -198,6 +207,18 @@ static void catcher() {
 	fputs("==================== Back to Loader ===================\n", stderr);
 	fprintf(stderr, "Total memory usage: %#llx\n", memory_usage);
 
+	memory_usage = 0;
+
+	// Free malloced elements in info
+	free(info.p_tab);
+
+	// Free pages
+	Pair *beg = mmap_list->list,
+		 *end = beg + mmap_list->idx;
+	for(Pair* it = beg; it != end; ++it){
+		Munmap(it->ptr, it->len);
+	}
+	_exit(0);
 }
 
 #define PTR_MANGLE(var) 			\
@@ -241,7 +262,7 @@ void Read(int fd, void* buf, ssize_t sz) {
 void Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset) {
 	void* ret = mmap(start, length, prot, flags, fd, offset);
 	assert(ret != MAP_FAILED);
-	memory_usage += MEM_CEIL(length, PAGE_SIZE);
+	memory_usage += length;
 
 	if(!mmap_list) {
 		mmap_list = malloc(sizeof *mmap_list + 8 * sizeof(Pair));
@@ -253,6 +274,6 @@ void Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset)
 		mmap_list->capacity *= 2;
 	}
 
-	mmap_list->list[mmap_list->idx++] = (Pair) { .ptr = ret, .len = length };
+	mmap_list->list[mmap_list->idx++] = (Pair) { .ptr = ret, .len = MEM_CEIL(length, PAGE_SIZE) };
 }
 

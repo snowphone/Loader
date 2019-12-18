@@ -20,7 +20,7 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 
 void Execve(const int argc, const char* argv[], const char* envp[]) {
 	memory_usage = 0;
-	Info info = read_elf(argc, argv, envp);
+	info = read_elf(argc, argv, envp);
 
 	DEBUG("# of segments: %d\n", info.elf_hdr.e_phnum);
 
