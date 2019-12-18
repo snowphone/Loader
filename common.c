@@ -1,5 +1,7 @@
 #include "common.h"
 
+ucontext_t context;
+ucontext_t loadee_context;
 unsigned long long memory_usage = 0ULL;
 Array* mmap_list = NULL;
 
@@ -49,10 +51,15 @@ Auxv_t* get_auxv(const char* envp[]) {
 	return (Auxv_t*)p;
 }
 
+static void catcher() {
+	setcontext(&context);
+}
 
-uint64_t make_stack(const Info info) {
-	void* sp = mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-	assert(sp != MAP_FAILED);
+
+void switch_context(const Info info) {
+	void* sp = Mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+
+	void* begin = sp;
 
 	sp += STACK_SIZE;
 
@@ -92,11 +99,9 @@ uint64_t make_stack(const Info info) {
 			}
 		}
 
-
-		DEBUG("########## auxc: %ld ###########\n", auxc);
-
 		sp -= (auxc) * sizeof(Auxv_t);
 		memmove(sp, auxv, (auxc) * sizeof(Auxv_t));
+
 	}
 
 	const size_t envc = (const char**)auxv - info.envp;	// Includes NULL
@@ -105,18 +110,26 @@ uint64_t make_stack(const Info info) {
 	sp -= envc * sizeof(char*);
 	memmove(sp, info.envp, envc * sizeof(char*));
 
-	DEBUG("########## envc: %ld ###########\n", envc);
-
 	// copy argv to stack
 	sp -= (info.argc + 1) * sizeof(char*);
 	memmove(sp, info.argv, (info.argc + 1) * sizeof(char*));
 
-	// copy argc to stack
-	sp -= sizeof(info.argc);
-	memmove(sp, &info.argc, sizeof(info.argc));
+	sp -= sizeof info.argc;
+	memmove(sp, &info.argc, sizeof info.argc);
 
+	getcontext(&loadee_context);
+	loadee_context.uc_link = NULL;
+	loadee_context.uc_stack.ss_size = sp - begin;
+	loadee_context.uc_stack.ss_sp = begin;
 
-	return (uint64_t)sp;
+	makecontext(&loadee_context, (void*)info.elf_hdr.e_entry, 0);
+
+	loadee_context.uc_mcontext.gregs[REG_RSP] = (greg_t)sp;
+	loadee_context.uc_mcontext.gregs[REG_RDX] = (greg_t)catcher;	// Exploit rtld_fini
+
+	fputs("================== Context Switching ==================\n", stderr);
+	swapcontext(&context, &loadee_context);
+	fputs("=================== Back to Loader ====================\n", stderr);
 }
 
 Info read_elf(int argc, const char* argv[], const char* envp[]) {
@@ -130,7 +143,7 @@ Info read_elf(int argc, const char* argv[], const char* envp[]) {
 
 	if(info.fd == -1) {
 		fprintf(stderr, "Open error: failed to open %s\n", argv[0]);
-		exit(1);
+		abort();
 	}
 
 	// Read ELF header
@@ -138,11 +151,9 @@ Info read_elf(int argc, const char* argv[], const char* envp[]) {
 
 	Read(info.fd, &info.elf_hdr, sizeof(info.elf_hdr));
 
-	assert( memcmp(info.elf_hdr.e_ident, ELFMAG, SELFMAG) == 0);
-	assert( info.elf_hdr.e_ident[EI_CLASS] == ELFCLASS64);
-	assert( info.elf_hdr.e_type == ET_EXEC || info.elf_hdr.e_type == ET_DYN);
-
-	DEBUG("entry point: %#lx\n", info.elf_hdr.e_entry);
+	assert(memcmp(info.elf_hdr.e_ident, ELFMAG, SELFMAG) == 0);
+	assert(info.elf_hdr.e_ident[EI_CLASS] == ELFCLASS64);
+	assert(info.elf_hdr.e_type == ET_EXEC || info.elf_hdr.e_type == ET_DYN);
 
 	// Read program header table
 	const size_t p_tab_sz = info.elf_hdr.e_phentsize * info.elf_hdr.e_phnum;
@@ -154,103 +165,29 @@ Info read_elf(int argc, const char* argv[], const char* envp[]) {
 	return info;
 }
 
-char* get_strtab(Info* info, Elf64_Shdr* sym_tab) {
-	Elf64_Shdr* hdr = sym_tab + info->elf_hdr.e_shstrndx - 1;
-	size_t sz = hdr->sh_size;
-	char* buf = malloc(sz);
-	lseek(info->fd, hdr->sh_offset, SEEK_SET);
-	Read(info->fd, buf, sz);
-	return buf;
-}
 
-static void* find_exit_symbol(Info* info) {
-	size_t sym_hdr_sz = info->elf_hdr.e_shnum * info->elf_hdr.e_shentsize;
-	lseek(info->fd, info->elf_hdr.e_shoff, SEEK_SET);
-	Elf64_Shdr* sym_hdr = malloc(sym_hdr_sz);
-	Read(info->fd, sym_hdr, sym_hdr_sz);
-
-	char* symbol_names = get_strtab(info, sym_hdr);
-
-	void* addr = NULL;
-	Elf64_Sym* sym = NULL;
-
-	for(Elf64_Shdr* it = sym_hdr; it != sym_hdr + info->elf_hdr.e_shnum; ++it) {
-		if(it->sh_type != SHT_SYMTAB)
-			continue;
-
-		size_t sym_sz = it->sh_size * it->sh_entsize;
-		sym = malloc(sym_sz);
-		lseek(info->fd, it->sh_offset, SEEK_SET);
-		Read(info->fd, sym, sym_sz);
-
-
-		for(Elf64_Sym* jt = sym; jt != sym + it->sh_size; ++jt) {
-			if(jt->st_info & STT_OBJECT && jt->st_info & STB_GLOBAL) {
-				if(jt->st_name == SHN_UNDEF) // str name is not encoded
-					continue;
-				char* name = symbol_names + jt->st_name;
-				if(strcmp(name, "__exit_funcs") != 0) 
-					continue;
-				addr = (void*)jt->st_value;
-				goto found_address;
-			}
-		}
-	}
-found_address:
-	free(sym_hdr);
-	free(symbol_names);
-	free(sym);
-	return addr;
-}
-
-static void catcher() {
-	fputs("==================== Back to Loader ===================\n", stderr);
-	fprintf(stderr, "Total memory usage: %#llx\n", memory_usage);
-
-	memory_usage = 0;
-
-	// Free malloced elements in info
+void release_memory() {
+	close(info.fd);
 	free(info.p_tab);
 
-	// Free pages
-	Pair *beg = mmap_list->list,
-		 *end = beg + mmap_list->idx;
-	for(Pair* it = beg; it != end; ++it){
+	while(mmap_list->idx){
+		mmap_list->idx--;
+		Pair* it = mmap_list->list + mmap_list->idx;
+		DEBUG("Freeing ptr: %p, len: %#lx...", it->ptr, it->len);
 		Munmap(it->ptr, it->len);
+		DEBUG(" done!\n");
 	}
-	_exit(0);
 }
 
-#define PTR_MANGLE(var) 			\
-	asm ("mov %0, %%r10\n\t"		\
-		"xor %%fs:0x30, %%r10\n\t"	\
-		"rol $0x11, %%r10\n\t"		\
-		"mov %%r10, %0\n\t"			\
-		:"+r" (var)					\
-		)
 
-void install_catcher(Info* info) {
-	void** target_symbol_addr = find_exit_symbol(info);
-	uint64_t* list = *target_symbol_addr;
-
-	uint64_t func_addr = (uint64_t)catcher;
-	PTR_MANGLE(func_addr);
-
-	list[0] = (uint64_t)NULL;
-	list[1] = 1;	// index
-	list[2] = 4;	// flavor: ef_cxa
-	list[3] = func_addr;
-	list[4] = (uint64_t)NULL;	// arg
-	list[5] = (uint64_t)NULL; 	//dso_handle == *(void**)0x6b90e8. mostly, assigned to 0
-
-	DEBUG("function address: %p, mangled address: %#lx\n", catcher, func_addr);
-}
 
 void Read(int fd, void* buf, ssize_t sz) {
 	while(sz > 0) {
 		ssize_t readn = read(fd, buf, sz);
-		assert(readn >= 0);
-		if(readn == 0) {
+		if(readn < 0) {
+			perror("Failed to read");
+			abort();
+		} else if(readn == 0) {
 			break; 
 		} else {
 			sz -= readn;
@@ -259,7 +196,8 @@ void Read(int fd, void* buf, ssize_t sz) {
 	}
 }
 
-void Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset) {
+void* Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset) {
+	//assert(0x6baa40 < start || start + length <= 0x6baa40);
 	void* ret = mmap(start, length, prot, flags, fd, offset);
 	assert(ret != MAP_FAILED);
 	memory_usage += length;
@@ -274,6 +212,17 @@ void Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset)
 		mmap_list->capacity *= 2;
 	}
 
+
 	mmap_list->list[mmap_list->idx++] = (Pair) { .ptr = ret, .len = MEM_CEIL(length, PAGE_SIZE) };
+	DEBUG("Virtual address: [%p, %p), total memory usage: %llu B\n", ret, ret + length, memory_usage);
+	return ret;
+}
+
+void Munmap(void* addr, size_t len) {
+	int r = munmap(addr, len);
+	if(r < 0) {
+		perror("Failed to unmap");
+		abort();
+	}
 }
 
