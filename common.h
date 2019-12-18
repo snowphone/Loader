@@ -49,6 +49,7 @@ typedef Elf64_auxv_t Auxv_t;
 
 
 // Wrapper functions that guarantee to do well
+#define Munmap(...)		assert(munmap(__VA_ARGS__) != -1)
 #define Sigaction(...)	assert(sigaction(__VA_ARGS__) != -1)
 
 enum { STACK_SIZE = PAGE_SIZE * 64ULL, };
@@ -61,7 +62,9 @@ typedef struct Info {
 	uint64_t argc;
 	const char** argv;
 	const char** envp;
-}Info;
+} Info;
+
+extern Info info;
 
 extern unsigned long long memory_usage;
 
