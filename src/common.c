@@ -1,6 +1,6 @@
 #include "common.h"
 
-ucontext_t context;
+ucontext_t loader_context;
 ucontext_t loadee_context;
 unsigned long long memory_usage = 0ULL;
 Array* mmap_list = NULL;
@@ -52,11 +52,16 @@ Auxv_t* get_auxv(const char* envp[]) {
 }
 
 static void catcher() {
-	setcontext(&context);
+	setcontext(&loader_context);
 }
 
-
-void switch_context(const Info info) {
+/**
+ * 
+ * @param info
+ * @param _beg The lowest address of stack space. Used as return value.
+ * @param _sp  Current stack pointer which points to argc. Used as return value.
+ */
+static void create_stack(const Info info, void** _beg, void** _sp) {
 	void* sp = Mmap(NULL, STACK_SIZE, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
 
 	void* begin = sp;
@@ -117,10 +122,23 @@ void switch_context(const Info info) {
 	sp -= sizeof info.argc;
 	memmove(sp, &info.argc, sizeof info.argc);
 
+	// Assign return values
+	*_beg = begin, *_sp = sp;
+}
+
+/**
+ * @brief Jump to the address that info holds and jump back to here when the loadee is terminated.
+ * 
+ * @param info 
+ */
+void switch_context(const Info info) {
+	void* sp_begin, *sp;
+	create_stack(info, &sp_begin, &sp);
+
 	getcontext(&loadee_context);
 	loadee_context.uc_link = NULL;
-	loadee_context.uc_stack.ss_size = sp - begin;
-	loadee_context.uc_stack.ss_sp = begin;
+	loadee_context.uc_stack.ss_size = sp - sp_begin;
+	loadee_context.uc_stack.ss_sp = sp_begin;
 
 	makecontext(&loadee_context, (void*)info.elf_hdr.e_entry, 0);
 
@@ -128,10 +146,18 @@ void switch_context(const Info info) {
 	loadee_context.uc_mcontext.gregs[REG_RDX] = (greg_t)catcher;	// Exploit rtld_fini
 
 	fputs("================== Context Switching ==================\n", stderr);
-	swapcontext(&context, &loadee_context);
+	swapcontext(&loader_context, &loadee_context);
 	fputs("=================== Back to Loader ====================\n", stderr);
 }
 
+/**
+ * @brief Parse elf header and other informations corresponding to loadee
+ * 
+ * @param argc argc of the loadee
+ * @param argv argv of the loadee
+ * @param envp envp of the loadee
+ * @return Info 
+ */
 Info read_elf(int argc, const char* argv[], const char* envp[]) {
 	Info info = { 
 		.fd = open(argv[0], O_RDONLY),
@@ -162,16 +188,21 @@ Info read_elf(int argc, const char* argv[], const char* envp[]) {
 	lseek(info.fd, info.elf_hdr.e_phoff, SEEK_SET);
 	Read(info.fd, info.p_tab, p_tab_sz);
 
+	info.base_addr = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
+
 	return info;
 }
 
 
+/**
+ * @brief Free info.fd, info.p_tab and mapped pages
+ * 
+ */
 void release_memory() {
 	close(info.fd);
 	free(info.p_tab);
 
-	while(mmap_list->idx){
-		mmap_list->idx--;
+	while(--mmap_list->idx){
 		Pair* it = mmap_list->list + mmap_list->idx;
 		DEBUG("Freeing ptr: %p, len: %#lx...", it->ptr, it->len);
 		Munmap(it->ptr, it->len);
@@ -196,6 +227,17 @@ void Read(int fd, void* buf, ssize_t sz) {
 	}
 }
 
+/**
+ * @brief Error-free version of mmap. It crash-checks and also store its information to page_list for releasing them later
+ * 
+ * @param start 
+ * @param length 
+ * @param prot 
+ * @param flags 
+ * @param fd 
+ * @param offset 
+ * @return void* 
+ */
 void* Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset) {
 	//assert(0x6baa40 < start || start + length <= 0x6baa40);
 	void* ret = mmap(start, length, prot, flags, fd, offset);

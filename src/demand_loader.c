@@ -1,5 +1,3 @@
-#include "loader.h"
-
 #include "common.h"
 
 #define __USE_GNU
@@ -22,13 +20,11 @@ static void install_segv_handler();
 static void bind_page(const uint64_t fault_addr);
 
 
-void demand_execve(const int argc, const char* argv[], const char* envp[]) {
+void exec(const int argc, const char **argv, const char **envp) {
 	memory_usage = 0;
 	install_segv_handler();
 
 	info = read_elf(argc, argv, envp);
-
-	info.base_addr = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
 
 	if (find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
 		assert("Dynamic linker is not yet implemented" && 0);

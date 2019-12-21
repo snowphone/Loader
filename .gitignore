@@ -1,7 +1,6 @@
 # Irrelevant source files
 *.i	# preprocessed source codes
 *.s # assembly codes
-*.txt
 
 # Prerequisites
 *.d
