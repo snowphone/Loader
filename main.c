@@ -31,12 +31,11 @@ void restore_fs(uint64_t* fs_p) {
 }
 
 int main(int argc, const char* argv[]) {
-	uint64_t* fs_base = NULL;
+	uint64_t fs_base[1];
 	if(argc == 1) {
 		fprintf(stderr, "Usage: %s <program>, [...]\n", argv[0]);
 		exit(1);
 	}
-	fs_base = malloc(sizeof *fs_base);
 	backup_fs(fs_base);
 
 
