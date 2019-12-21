@@ -26,11 +26,6 @@
 #endif
 
 
-typedef Elf64_Ehdr Ehdr;
-typedef Elf64_Phdr Phdr;
-typedef Elf64_Shdr Shdr;
-typedef Elf64_auxv_t Auxv_t;
-
 #ifndef NDEBUG
  #define DEBUG(...) fprintf(stderr, __VA_ARGS__)
 #else
@@ -56,7 +51,14 @@ typedef Elf64_auxv_t Auxv_t;
 // Wrapper functions that guarantee to do well
 #define Sigaction(...)	assert(sigaction(__VA_ARGS__) != -1)
 
+
 enum { STACK_SIZE = PAGE_SIZE * 64ULL, };
+
+typedef Elf64_Ehdr Ehdr;
+typedef Elf64_Phdr Phdr;
+typedef Elf64_Shdr Shdr;
+typedef Elf64_auxv_t Auxv_t;
+
 
 typedef struct Info {
 	uint64_t fd;
@@ -67,14 +69,6 @@ typedef struct Info {
 	const char** argv;
 	const char** envp;
 } Info;
-
-extern Info info;
-
-extern unsigned long long memory_usage;
-
-extern unsigned long fs_base;
-
-extern ucontext_t context, loadee_context;
 
 typedef struct {
 	void* ptr;
@@ -87,7 +81,13 @@ typedef struct {
 	Pair list[];
 } Array;
 
+
+extern Info info;
+extern unsigned long long memory_usage;
+extern unsigned long fs_base;
+extern ucontext_t loader_context, loadee_context;
 extern Array* mmap_list;
+
 
 Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf);
 
