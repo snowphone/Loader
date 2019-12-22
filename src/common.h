@@ -103,7 +103,7 @@ Info read_elf(int argc, const char* argv[], const char* envp[]);
 
 void install_catcher(Info* info);
 
-void* Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset);
+void* Mmap(void *start, ssize_t length, int prot, int flags, int fd, off_t offset);
 
 void Read(int fd, void* buf, ssize_t sz);
 

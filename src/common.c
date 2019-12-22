@@ -164,7 +164,7 @@ Info read_elf(int argc, const char* argv[], const char* envp[]) {
 		.argc = argc,
 		.argv = argv,
 		.envp = envp,
-		.base_addr = UINT64_MAX,
+		.base_addr = 0
 	};
 
 	if(info.fd == -1) {
@@ -238,10 +238,14 @@ void Read(int fd, void* buf, ssize_t sz) {
  * @param offset 
  * @return void* 
  */
-void* Mmap(void *start, size_t length, int prot, int flags, int fd, off_t offset) {
+void* Mmap(void *start, ssize_t length, int prot, int flags, int fd, off_t offset) {
 	//assert(0x6baa40 < start || start + length <= 0x6baa40);
 	void* ret = mmap(start, length, prot, flags, fd, offset);
-	assert(ret != MAP_FAILED);
+	if(ret == MAP_FAILED) {
+		perror("mmap error");
+		fprintf(stderr, "%p, %ld\n", start, length);
+		abort();
+	}
 	memory_usage += length;
 
 	if(!mmap_list) {
