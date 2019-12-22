@@ -21,13 +21,13 @@ void exec(const int argc, const char **argv, const char **envp) {
 	for(Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
 		if(it->p_type == PT_LOAD){
 			uint64_t mapped_addr = (uint64_t)bind_segment(info.fd, &info.elf_hdr, it);
-			info.base_addr = MIN(info.base_addr, mapped_addr);
+			if(!info.base_addr)
+				info.base_addr = mapped_addr;
 		}
-
-		const Phdr* interpreter;	// dynamic linker interpreter(ld-linux.so)
-		if((interpreter = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_DYNAMIC))) {
-			assert("Not yet implemented" && 0);
-		}
+	}
+	const Phdr* interpreter;	// dynamic linker interpreter(ld-linux.so)
+	if((interpreter = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_DYNAMIC))) {
+		assert("Not yet implemented" && 0);
 	}
 
 	switch_context(info);
@@ -59,13 +59,19 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 	if(phdr->p_memsz > phdr->p_filesz) {
 		// .bss section
 		void* bss = (void*)(phdr->p_vaddr + phdr->p_filesz);
-		size_t sz = MEM_CEIL(bss, PAGE_SIZE) - (uint64_t)bss;
+		ssize_t sz = MEM_CEIL(bss, PAGE_SIZE);
+		sz -= (uint64_t)bss;
 		memset(bss, 0, sz);
 
 		bss += sz;
-		sz = (phdr->p_memsz - phdr->p_filesz) - sz;
-		Mmap(bss, sz, prot, flags | MAP_ANONYMOUS, -1, 0);
-		memset(bss, 0, sz);
+
+		// If .bss section needs more than one page
+		void* actual_bss_end = (void*)phdr->p_vaddr + phdr->p_memsz;
+		if(bss < actual_bss_end) {
+			sz = (phdr->p_memsz - phdr->p_filesz) - sz;
+			Mmap(bss, sz, prot, flags | MAP_ANONYMOUS, -1, 0);
+			memset(bss, 0, sz);
+		}
 
 		len += sz;
 	}
