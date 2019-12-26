@@ -1,5 +1,7 @@
 #include "common.h"
 
+#include "dynamic.h"
+
 #define __USE_GNU
 
 #include <elf.h>
@@ -27,14 +29,14 @@ void exec(const char* filename) {
 	info = read_elf(filename);
 
 	if (find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
-		assert("Dynamic linker is not yet implemented" && 0);
+		load_library(info);
+	} else {
+		bind_page(info.elf_hdr.e_entry);
+
+		switch_context(info);
+
+		release_memory();
 	}
-
-	bind_page(info.elf_hdr.e_entry);
-
-	switch_context(info);
-
-	release_memory();
 
 	return;
 }

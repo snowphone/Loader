@@ -1,5 +1,7 @@
 #include "common.h"
 
+#include "dynamic.h"
+
 #include <elf.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -15,24 +17,27 @@
 static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const phdr);
 
 void exec(const char* filename) {
+	DEBUG("Loading %s...\n", filename);
 	memory_usage = 0;
-	info = read_elf(filename);
+	Info l_info = read_elf(filename);
 
-	for(Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
+	for(Phdr* it = l_info.p_tab; it != l_info.p_tab + l_info.elf_hdr.e_phnum; ++it) {
 		if(it->p_type == PT_LOAD){
-			uint64_t mapped_addr = (uint64_t)bind_segment(info.fd, &info.elf_hdr, it);
-			if(!info.base_addr)
-				info.base_addr = mapped_addr;
+			uint64_t mapped_addr = (uint64_t)bind_segment(l_info.fd, &l_info.elf_hdr, it);
+			if(!l_info.base_addr)
+				l_info.base_addr = mapped_addr;
 		}
 	}
-	const Phdr* interpreter;	// dynamic linker interpreter(ld-linux.so)
-	if((interpreter = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_DYNAMIC))) {
-		assert("Not yet implemented" && 0);
+	if(find_phdr(l_info.p_tab, l_info.elf_hdr.e_phnum, PT_DYNAMIC)) {
+		load_library(l_info);
+	} else {
+		DEBUG("This is executable binary!\n");
+		info = l_info;
+		switch_context(info);
+
+		release_memory();
 	}
 
-	switch_context(info);
-
-	release_memory();
 	return;
 }
 
@@ -45,14 +50,14 @@ void exec(const char* filename) {
  */
 static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const phdr) {
 	// cf. A segment contains several sections such as .text, .init, and so on.
-	void* const aligned_begin = (void*)MEM_ALIGN(phdr->p_vaddr, PAGE_SIZE);
+	void* aligned_begin = (void*)MEM_ALIGN(phdr->p_vaddr, PAGE_SIZE);
 	const uint64_t front_pad = MEM_OFFSET(phdr->p_vaddr, PAGE_SIZE);
 	size_t len = MEM_CEIL(phdr->p_filesz + front_pad, PAGE_SIZE);
 	const int prot = make_prot(phdr->p_flags);
 	const int flags = elf_hdr->e_type == ET_EXEC ? MAP_PRIVATE | MAP_FIXED : MAP_PRIVATE;
 	const unsigned int file_offset = phdr->p_offset - front_pad;
 
-	Mmap(aligned_begin, len, prot, flags, fd, file_offset);
+	aligned_begin = Mmap(aligned_begin, len, prot, flags, fd, file_offset);
 	// Memory is mapped in private mode, so its modification only affects on private copy, not the file. 
 	memset(aligned_begin, 0, front_pad);
 
