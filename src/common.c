@@ -4,6 +4,7 @@ ucontext_t loader_context;
 ucontext_t loadee_context;
 unsigned long long memory_usage = 0ULL;
 Array* mmap_list = NULL;
+const char** envp = NULL;
 
 Info info = {
 	.fd = 0,
@@ -11,7 +12,7 @@ Info info = {
 	.p_tab = NULL,
 	.argc = 0,
 	.argv = NULL,
-	.envp = NULL
+	.envp = NULL,
 };
 
 Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf) {
@@ -158,10 +159,13 @@ void switch_context(const Info info) {
  * @param envp envp of the loadee
  * @return Info 
  */
-Info read_elf(int argc, const char* argv[], const char* envp[]) {
+Info read_elf(const char* filename) {
+	const char** argv =  calloc(2, sizeof *argv);
+	argv[0] = filename;
+
 	Info info = { 
-		.fd = open(argv[0], O_RDONLY),
-		.argc = argc,
+		.fd = open(filename, O_RDONLY),
+		.argc = 1,
 		.argv = argv,
 		.envp = envp,
 		.base_addr = 0

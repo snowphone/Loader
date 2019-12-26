@@ -87,6 +87,7 @@ extern unsigned long long memory_usage;
 extern unsigned long fs_base;
 extern ucontext_t loader_context, loadee_context;
 extern Array* mmap_list;
+extern const char** envp;
 
 
 Phdr* read_prog_hdr_table(const Ehdr* e_hdr, const char* const buf);
@@ -99,7 +100,7 @@ Auxv_t* get_auxv(const char* envp[]);
 
 void switch_context(const Info info);
 
-Info read_elf(int argc, const char* argv[], const char* envp[]);
+Info read_elf(const char* filename);
 
 void install_catcher(Info* info);
 

@@ -5,7 +5,8 @@
 
 #include <asm/prctl.h>
 
-void exec(const int argc, const char **argv, const char **envp);
+extern const char** envp;
+void exec(const char* filename);
 
 void backup_fs(uint64_t* fs_p) {
 	volatile uint64_t var;
@@ -35,12 +36,12 @@ int main(int argc, const char* argv[]) {
 	}
 	backup_fs(fs_base);
 
-	const char** envp = argv;
+	envp = argv;
 	while(*envp++);
 	
 	for(int i = 1; i < argc; ++i) {
 		fprintf(stderr, "#%d: Loading %s...\n", i, argv[i]);
-		exec(argc - i, argv + i, envp);
+		exec(argv[i]);
 		restore_fs(fs_base);
 	}
 

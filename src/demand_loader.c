@@ -20,11 +20,11 @@ static void install_segv_handler();
 static void bind_page(const uint64_t fault_addr);
 
 
-void exec(const int argc, const char **argv, const char **envp) {
+void exec(const char* filename) {
 	memory_usage = 0;
 	install_segv_handler();
 
-	info = read_elf(argc, argv, envp);
+	info = read_elf(filename);
 
 	if (find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
 		assert("Dynamic linker is not yet implemented" && 0);

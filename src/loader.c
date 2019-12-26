@@ -14,9 +14,9 @@
 
 static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* const phdr);
 
-void exec(const int argc, const char **argv, const char **envp) {
+void exec(const char* filename) {
 	memory_usage = 0;
-	info = read_elf(argc, argv, envp);
+	info = read_elf(filename);
 
 	for(Phdr* it = info.p_tab; it != info.p_tab + info.elf_hdr.e_phnum; ++it) {
 		if(it->p_type == PT_LOAD){
