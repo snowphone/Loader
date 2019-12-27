@@ -28,9 +28,12 @@ void exec(const char* filename) {
 				l_info.base_addr = mapped_addr;
 		}
 	}
-	if(find_phdr(l_info.p_tab, l_info.elf_hdr.e_phnum, PT_DYNAMIC)) {
+	const void* interp = find_phdr(l_info.p_tab, l_info.elf_hdr.e_phnum, PT_DYNAMIC);
+	if(interp) {
 		load_library(l_info);
-	} else {
+		relocate(l_info);
+	} 
+	if(!interp || !strstr(filename, ".so")) {
 		DEBUG("This is executable binary!\n");
 		info = l_info;
 		switch_context(info);

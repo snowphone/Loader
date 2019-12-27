@@ -26,11 +26,13 @@ void exec(const char* filename) {
 	memory_usage = 0;
 	install_segv_handler();
 
-	info = read_elf(filename);
+	Info l_info = read_elf(filename);
 
-	if (find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_INTERP)) {
-		load_library(info);
+	if (find_phdr(l_info.p_tab, l_info.elf_hdr.e_phnum, PT_INTERP)) {
+		load_library(l_info);
+		relocate(l_info);
 	} else {
+		info = l_info;
 		bind_page(info.elf_hdr.e_entry);
 
 		switch_context(info);

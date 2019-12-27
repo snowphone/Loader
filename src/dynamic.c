@@ -1,4 +1,5 @@
-#include "common.h"
+#include "dynamic.h"
+
 
 #include <unistd.h>
 
@@ -13,13 +14,6 @@ static const char* base_dir[] = {
 	NULL
 };
 
-static Elf64_Dyn* find_dyn(Elf64_Dyn* table, uint64_t tag) {
-	for(Elf64_Dyn* it = table; it->d_tag != DT_NULL; ++it) {
-		if(it->d_tag == tag)
-			return it;
-	}
-	return NULL;
-}
 
 char* get_valid_lib_path(const char* path) {
 	DEBUG("Filename: %s\n", path);
@@ -53,7 +47,7 @@ static uint64_t hash(const char* str) {
 	return hash;
 }
 
-static bool contains(const char* str) {
+static bool already_loaded(const char* str) {
 	uint64_t hashed = hash(str);
 	for(int i = 0; i < loaded_lib_len; ++i) {
 		if(hashed == loaded_lib_list[i])
@@ -62,39 +56,81 @@ static bool contains(const char* str) {
 	return false;
 }
 
-static void append(const char* str) {
+static void append_lib(const char* str) {
 	assert(loaded_lib_len < sizeof loaded_lib_list);
 	uint64_t hashed = hash(str);
 	loaded_lib_list[loaded_lib_len++] = hashed;
 }
 
 void load_library(Info info) {
-	const Phdr* dynamic = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_DYNAMIC);
-
-	Elf64_Dyn* dyn_table = malloc(dynamic->p_memsz);
-	lseek(info.fd, dynamic->p_offset, SEEK_SET);
-	Read(info.fd, dyn_table, dynamic->p_memsz);
-
-	uint64_t str_sz = find_dyn(dyn_table, DT_STRSZ)->d_un.d_val;
-
-	char* strtab = malloc(str_sz);
-	size_t offset = find_dyn(dyn_table, DT_STRTAB)->d_un.d_ptr - find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
-	lseek(info.fd, offset, SEEK_SET);
-	Read(info.fd, strtab, str_sz);
-
-	for(Elf64_Dyn* it = dyn_table; it->d_tag != DT_NULL; ++it) {
+	for(Elf64_Dyn* it = info.dyn_table; it->d_tag != DT_NULL; ++it) {
 		if(it->d_tag == DT_NEEDED) {
-			const char* filename = strtab + it->d_un.d_ptr;
+			const char* filename = info.strtab + it->d_un.d_ptr;
 			if(memcmp(filename, "ld", 2) == 0) {
 				DEBUG("Do not load %s because it is dynamic loader\n", filename);
 				continue;
-			} else if(contains(filename)) {
+			} else if(already_loaded(filename)) {
 				DEBUG("Do not load %s because it is already loaded\n", filename);
 				continue;
 			}
 			const char* full_path = get_valid_lib_path(filename);
-			append(filename);
+			append_lib(filename);
 			exec(full_path);
 		}
+	}
+}
+
+Shdr* get_plt(const Info info) {
+	int cnt = 0;
+	for(Shdr* it = info.shdr_tab; it != info.shdr_tab + info.elf_hdr.e_shnum; ++it) {
+		if(it->sh_type == SHT_PROGBITS && it->sh_flags == (SHF_ALLOC | SHF_EXECINSTR)) {
+			++cnt;
+		}
+		if(cnt == 2)
+			return it;
+	}
+	return NULL;
+}
+
+void relocate(Info info) {
+	DEBUG("%s\n", __func__);
+	/* 
+	 * DT_JMPREL: .rela.plt section을 가리킴
+	 * DT_PLTGOT: .got section을 가리킴
+	 * DT_PLTREL: RELA를 사용할지 REL을 사용할지 담김
+	 * DT_RELA: .rela.dyn 값이 들어있었다.
+	 */
+	Elf64_Dyn *plt = (void*)find_dyn(info.dyn_table, DT_JMPREL),
+			  *pltsz = (void*)find_dyn(info.dyn_table, DT_PLTRELSZ),
+			  *got = (void*)find_dyn(info.dyn_table, DT_PLTGOT),
+			  *pltrel = (void*)find_dyn(info.dyn_table, DT_PLTREL),
+			  *rela = (void*)find_dyn(info.dyn_table, DT_RELA);
+
+	assert(pltrel->d_un.d_val == DT_RELA);
+
+	Shdr* plt_hdr = get_plt(info);
+	DEBUG("Real plt addr: %#lx, length: %lx, ent: %lx\n", plt_hdr->sh_addr, plt_hdr->sh_size, plt_hdr->sh_entsize);
+
+
+
+	Elf64_Rela* rela_list = (void*)plt->d_un.d_ptr + info.base_addr; 	// .rela.plt verified
+	size_t size = plt->d_un.d_val;
+	DEBUG("GOT Address: %#lx\n", got->d_un.d_ptr);
+	DEBUG("Symbol table size: %d\n", info.elf_hdr.e_shnum);
+	DEBUG("Assumed plt addr: %p, length: %lu\n", rela_list, size);
+	for(int i = 0; i < size / 24; ++i) {
+		uint64_t type = ELF64_R_TYPE(rela_list[i].r_info),
+				 sym_idx = ELF64_R_SYM(rela_list[i].r_info);
+
+		if(type != DT_RELA)
+			break;
+		if(sym_idx >= info.elf_hdr.e_shnum)
+			continue;
+
+		DEBUG("#%d: %#lx, %#lx, %#lx\t", i, rela_list[i].r_offset, rela_list[i].r_info, rela_list[i].r_addend);
+		assert(info.symtab);
+		assert(info.strtab);
+		char* name = info.symtab[sym_idx].st_name + info.strtab;
+		DEBUG("Type : %#lx, sym_idx: %#lx, name: %s\n", type, sym_idx, name);
 	}
 }

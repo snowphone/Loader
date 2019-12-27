@@ -141,7 +141,10 @@ void switch_context(const Info info) {
 	loadee_context.uc_stack.ss_size = sp - sp_begin;
 	loadee_context.uc_stack.ss_sp = sp_begin;
 
-	makecontext(&loadee_context, (void*)info.elf_hdr.e_entry, 0);
+	void* entry = (void*)info.elf_hdr.e_entry;
+	if(info.dyn_table)
+		entry += info.base_addr;
+	makecontext(&loadee_context, entry, 0);
 
 	loadee_context.uc_mcontext.gregs[REG_RSP] = (greg_t)sp;
 	loadee_context.uc_mcontext.gregs[REG_RDX] = (greg_t)catcher;	// Exploit rtld_fini
@@ -193,10 +196,43 @@ Info read_elf(const char* filename) {
 	Read(info.fd, info.p_tab, p_tab_sz);
 
 	info.base_addr = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
+	const Phdr* dynamic = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_DYNAMIC);
+
+	info.shdr_tab = malloc(info.elf_hdr.e_shnum * info.elf_hdr.e_shentsize);
+	lseek(info.fd, info.elf_hdr.e_shoff, SEEK_SET);
+	Read(info.fd, info.shdr_tab, info.elf_hdr.e_shnum * info.elf_hdr.e_shentsize);
+
+	if(dynamic) {
+		info.dyn_table = malloc(dynamic->p_memsz);
+		lseek(info.fd, dynamic->p_offset, SEEK_SET);
+		Read(info.fd, info.dyn_table, dynamic->p_memsz);
+
+		uint64_t str_sz = find_dyn(info.dyn_table, DT_STRSZ)->d_un.d_val;
+		info.strtab = malloc(str_sz);
+		size_t offset = find_dyn(info.dyn_table, DT_STRTAB)->d_un.d_ptr - find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
+		lseek(info.fd, offset, SEEK_SET);
+		Read(info.fd, info.strtab, str_sz);
+
+		size_t symtab_bytes = info.elf_hdr.e_shentsize * info.elf_hdr.e_shnum;
+		info.symtab = malloc(symtab_bytes);
+		lseek(info.fd, info.elf_hdr.e_shoff, SEEK_SET);
+		Read(info.fd, info.symtab, symtab_bytes);
+	} else {
+		info.dyn_table = NULL;
+		info.strtab = NULL;
+		info.symtab = NULL;
+	}
 
 	return info;
 }
 
+Elf64_Dyn* find_dyn(Elf64_Dyn* table, uint64_t tag) {
+	for(Elf64_Dyn* it = table; it->d_tag != DT_NULL; ++it) {
+		if(it->d_tag == tag)
+			return it;
+	}
+	return NULL;
+}
 
 /**
  * @brief Free info.fd, info.p_tab and mapped pages
