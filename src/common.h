@@ -68,10 +68,6 @@ typedef struct Info {
 	uint64_t argc;
 	const char** argv;
 	const char** envp;
-	Elf64_Dyn* dyn_table;
-	char* strtab;
-	Elf64_Sym* symtab;
-	Shdr* shdr_tab;
 } Info;
 
 typedef struct {
@@ -117,4 +113,16 @@ void Munmap(void* addr, size_t len);
 void release_memory();
 
 Elf64_Dyn* find_dyn(Elf64_Dyn* table, uint64_t tag);
+
+Elf64_Shdr* find_shdr(Elf64_Shdr* table, size_t len, uint64_t tag);
+
+Shdr* get_shdr_tab(Info info, size_t* len);
+
+Elf64_Sym* get_dynsym_tab(Info info, size_t* len);
+
+char* get_strtab(Info info);
+
+Elf64_Dyn* get_dyn_tab(Info info, size_t* len);
+
+bool islibrary(const char* path);
 

@@ -1,5 +1,5 @@
 #include "dynamic.h"
-
+#include "common.h"
 
 #include <unistd.h>
 
@@ -63,9 +63,12 @@ static void append_lib(const char* str) {
 }
 
 void load_library(Info info) {
-	for(Elf64_Dyn* it = info.dyn_table; it->d_tag != DT_NULL; ++it) {
+	Elf64_Dyn* dyn_table = get_dyn_tab(info, NULL);
+	char* strtab = get_strtab(info);
+
+	for(Elf64_Dyn* it = dyn_table; it->d_tag != DT_NULL; ++it) {
 		if(it->d_tag == DT_NEEDED) {
-			const char* filename = info.strtab + it->d_un.d_ptr;
+			const char* filename = strtab + it->d_un.d_ptr;
 			if(memcmp(filename, "ld", 2) == 0) {
 				DEBUG("Do not load %s because it is dynamic loader\n", filename);
 				continue;
@@ -75,62 +78,77 @@ void load_library(Info info) {
 			}
 			const char* full_path = get_valid_lib_path(filename);
 			append_lib(filename);
+			DEBUG("New library: %s\n", full_path);
 			exec(full_path);
 		}
 	}
+	free(dyn_table);
+	free(strtab);
 }
 
 Shdr* get_plt(const Info info) {
+	Shdr* result = NULL;
+	size_t shdr_tab_len;
+	Shdr* shdr_tab = get_shdr_tab(info, &shdr_tab_len);
 	int cnt = 0;
-	for(Shdr* it = info.shdr_tab; it != info.shdr_tab + info.elf_hdr.e_shnum; ++it) {
+	for(Shdr* it = shdr_tab; it != shdr_tab + shdr_tab_len; ++it) {
 		if(it->sh_type == SHT_PROGBITS && it->sh_flags == (SHF_ALLOC | SHF_EXECINSTR)) {
 			++cnt;
 		}
-		if(cnt == 2)
-			return it;
+		if(cnt == 2) {
+			result = it;
+			break;
+		}
 	}
-	return NULL;
+
+	free(shdr_tab);
+	return result;
 }
 
 void relocate(Info info) {
-	DEBUG("%s\n", __func__);
+	DEBUG("Current function: %s\n", __func__);
+
+	Elf64_Dyn* dyn_table = get_dyn_tab(info, NULL);
+	char* strtab = get_strtab(info);
+	Elf64_Sym* symtab = get_dynsym_tab(info, NULL);
 	/* 
 	 * DT_JMPREL: .rela.plt section을 가리킴
+	 * DT_PLTRELSZ: .rela.plt 크기를 바이트 형태로 반환
+	 * DT_RELA: .rela.dyn 값이 들어있었다.
+	 * DT_RELASZ: .rela.dyn 크기를 바이트 형태로 반환
 	 * DT_PLTGOT: .got section을 가리킴
 	 * DT_PLTREL: RELA를 사용할지 REL을 사용할지 담김
-	 * DT_RELA: .rela.dyn 값이 들어있었다.
 	 */
-	Elf64_Dyn *plt = (void*)find_dyn(info.dyn_table, DT_JMPREL),
-			  *pltsz = (void*)find_dyn(info.dyn_table, DT_PLTRELSZ),
-			  *got = (void*)find_dyn(info.dyn_table, DT_PLTGOT),
-			  *pltrel = (void*)find_dyn(info.dyn_table, DT_PLTREL),
-			  *rela = (void*)find_dyn(info.dyn_table, DT_RELA);
+	Elf64_Dyn *rela_plt = (void*)find_dyn(dyn_table, DT_JMPREL),
+			  *plt_rel_sz = (void*)find_dyn(dyn_table, DT_PLTRELSZ),
+			  *got = (void*)find_dyn(dyn_table, DT_PLTGOT),
+			  *pltrel = (void*)find_dyn(dyn_table, DT_PLTREL),
+			  *rela_dyn = (void*)find_dyn(dyn_table, DT_RELA),
+			  *rela_sz = (void*)find_dyn(dyn_table, DT_RELASZ);
 
 	assert(pltrel->d_un.d_val == DT_RELA);
 
-	Shdr* plt_hdr = get_plt(info);
-	DEBUG("Real plt addr: %#lx, length: %lx, ent: %lx\n", plt_hdr->sh_addr, plt_hdr->sh_size, plt_hdr->sh_entsize);
-
-
-
-	Elf64_Rela* rela_list = (void*)plt->d_un.d_ptr + info.base_addr; 	// .rela.plt verified
-	size_t size = plt->d_un.d_val;
+	Elf64_Rela* rela_tab = (void*)rela_dyn->d_un.d_ptr + info.base_addr; 	// .rela.plt verified
+	size_t rela_tab_bytes = rela_sz->d_un.d_val + plt_rel_sz->d_un.d_val,
+		   rela_tab_len = rela_tab_bytes / sizeof *rela_tab;
 	DEBUG("GOT Address: %#lx\n", got->d_un.d_ptr);
-	DEBUG("Symbol table size: %d\n", info.elf_hdr.e_shnum);
-	DEBUG("Assumed plt addr: %p, length: %lu\n", rela_list, size);
-	for(int i = 0; i < size / 24; ++i) {
-		uint64_t type = ELF64_R_TYPE(rela_list[i].r_info),
-				 sym_idx = ELF64_R_SYM(rela_list[i].r_info);
+	DEBUG("rela addr: %p, # of entries: %lu\n", rela_tab, rela_tab_len);
 
-		if(type != DT_RELA)
-			break;
-		if(sym_idx >= info.elf_hdr.e_shnum)
-			continue;
+	for(int i = 0; i < rela_tab_len; ++i) {
+		uint64_t type = ELF64_R_TYPE(rela_tab[i].r_info),
+				 sym_idx = ELF64_R_SYM(rela_tab[i].r_info);
 
-		DEBUG("#%d: %#lx, %#lx, %#lx\t", i, rela_list[i].r_offset, rela_list[i].r_info, rela_list[i].r_addend);
-		assert(info.symtab);
-		assert(info.strtab);
-		char* name = info.symtab[sym_idx].st_name + info.strtab;
-		DEBUG("Type : %#lx, sym_idx: %#lx, name: %s\n", type, sym_idx, name);
+		if(type == R_X86_64_JUMP_SLOT || type == R_X86_64_GLOB_DAT) {
+			if(!symtab){
+				DEBUG("SHITTTTTTTTTTTTTTTTTTTTT!\n");
+				continue;
+			}
+			char* name = symtab[sym_idx].st_name + strtab;
+			DEBUG("#%d: %#lx, %#lx, %#lx\t", i, rela_tab[i].r_offset, rela_tab[i].r_info, rela_tab[i].r_addend);
+			DEBUG("Type : %#lx, sym_idx: %#lx, name: %s\n", type, sym_idx, name);
+		} 
 	}
+	free(dyn_table);
+	free(strtab);
+	free(symtab);
 }

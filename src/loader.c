@@ -28,13 +28,14 @@ void exec(const char* filename) {
 				l_info.base_addr = mapped_addr;
 		}
 	}
-	const void* interp = find_phdr(l_info.p_tab, l_info.elf_hdr.e_phnum, PT_DYNAMIC);
+	const void* interp = find_phdr(l_info.p_tab, l_info.elf_hdr.e_phnum, PT_INTERP);
 	if(interp) {
 		load_library(l_info);
 		relocate(l_info);
 	} 
-	if(!interp || !strstr(filename, ".so")) {
-		DEBUG("This is executable binary!\n");
+
+	if(!islibrary(filename)) {
+		DEBUG("%s is executable binary!\n", filename);
 		info = l_info;
 		switch_context(info);
 

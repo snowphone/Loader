@@ -142,7 +142,8 @@ void switch_context(const Info info) {
 	loadee_context.uc_stack.ss_sp = sp_begin;
 
 	void* entry = (void*)info.elf_hdr.e_entry;
-	if(info.dyn_table)
+	Elf64_Dyn* dyn_table = get_dyn_tab(info, NULL);
+	if(dyn_table)
 		entry += info.base_addr;
 	makecontext(&loadee_context, entry, 0);
 
@@ -152,6 +153,7 @@ void switch_context(const Info info) {
 	fputs("================== Context Switching ==================\n", stderr);
 	swapcontext(&loader_context, &loadee_context);
 	fputs("=================== Back to Loader ====================\n", stderr);
+	free(dyn_table);
 }
 
 /**
@@ -166,7 +168,7 @@ Info read_elf(const char* filename) {
 	const char** argv =  calloc(2, sizeof *argv);
 	argv[0] = filename;
 
-	Info info = { 
+	Info record = { 
 		.fd = open(filename, O_RDONLY),
 		.argc = 1,
 		.argv = argv,
@@ -174,56 +176,104 @@ Info read_elf(const char* filename) {
 		.base_addr = 0
 	};
 
-	if(info.fd == -1) {
+	if(record.fd == -1) {
 		fprintf(stderr, "Open error: failed to open %s\n", argv[0]);
 		abort();
 	}
 
 	// Read ELF header
-	lseek(info.fd, 0, SEEK_SET);
+	lseek(record.fd, 0, SEEK_SET);
 
-	Read(info.fd, &info.elf_hdr, sizeof(info.elf_hdr));
+	Read(record.fd, &record.elf_hdr, sizeof(record.elf_hdr));
 
-	assert(memcmp(info.elf_hdr.e_ident, ELFMAG, SELFMAG) == 0);
-	assert(info.elf_hdr.e_ident[EI_CLASS] == ELFCLASS64);
-	assert(info.elf_hdr.e_type == ET_EXEC || info.elf_hdr.e_type == ET_DYN);
+	assert(memcmp(record.elf_hdr.e_ident, ELFMAG, SELFMAG) == 0);
+	assert(record.elf_hdr.e_ident[EI_CLASS] == ELFCLASS64);
+	assert(record.elf_hdr.e_type == ET_EXEC || record.elf_hdr.e_type == ET_DYN);
 
 	// Read program header table
-	const size_t p_tab_sz = info.elf_hdr.e_phentsize * info.elf_hdr.e_phnum;
-	info.p_tab = malloc(p_tab_sz);
+	const size_t p_tab_sz = record.elf_hdr.e_phentsize * record.elf_hdr.e_phnum;
+	record.p_tab = malloc(p_tab_sz);
 
-	lseek(info.fd, info.elf_hdr.e_phoff, SEEK_SET);
-	Read(info.fd, info.p_tab, p_tab_sz);
+	lseek(record.fd, record.elf_hdr.e_phoff, SEEK_SET);
+	Read(record.fd, record.p_tab, p_tab_sz);
 
-	info.base_addr = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
+	record.base_addr = find_phdr(record.p_tab, record.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
+	
+	return record;
+}
+
+Elf64_Dyn* get_dyn_tab(Info info, size_t* len) {
 	const Phdr* dynamic = find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_DYNAMIC);
 
-	info.shdr_tab = malloc(info.elf_hdr.e_shnum * info.elf_hdr.e_shentsize);
+	if(len)
+		*len = 0;
+
+	if(!dynamic)
+		return NULL;
+
+	Elf64_Dyn* dyn_table = malloc(dynamic->p_memsz);
+	lseek(info.fd, dynamic->p_offset, SEEK_SET);
+	Read(info.fd, dyn_table, dynamic->p_memsz);
+	if(len)
+		*len = dynamic->p_memsz / sizeof *dyn_table;
+
+	return dyn_table;
+}
+
+char* get_strtab(Info info) {
+	Elf64_Dyn* dyn_table = get_dyn_tab(info, NULL);
+	uint64_t str_sz = find_dyn(dyn_table, DT_STRSZ)->d_un.d_val;
+	char* strtab = malloc(str_sz);
+	size_t offset = find_dyn(dyn_table, DT_STRTAB)->d_un.d_ptr - find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
+	lseek(info.fd, offset, SEEK_SET);
+	Read(info.fd, strtab, str_sz);
+
+	free(dyn_table);
+	return strtab;
+}
+
+Elf64_Sym* get_dynsym_tab(Info info, size_t* len) {
+	if(len)
+		*len = 0;
+	size_t shdr_len;
+	Shdr* shdr_tab = get_shdr_tab(info, &shdr_len);
+	Shdr* symtab_hdr = find_shdr(shdr_tab, shdr_len, SHT_DYNSYM);
+
+	if(!symtab_hdr) 
+		return NULL;
+
+	size_t symtab_bytes = symtab_hdr->sh_entsize * symtab_hdr->sh_size;
+
+	Elf64_Sym* symtab = malloc(symtab_bytes);
+	lseek(info.fd, symtab_hdr->sh_offset, SEEK_SET);
+	Read(info.fd, symtab, symtab_bytes);
+
+	if(len)
+		*len = symtab->st_size;
+
+	free(shdr_tab);
+	return symtab;
+}
+
+Shdr* get_shdr_tab(Info info, size_t* len) {
+	size_t shdr_bytes = info.elf_hdr.e_shentsize * info.elf_hdr.e_shnum;
+	Shdr* shdr_tab = malloc(shdr_bytes);
 	lseek(info.fd, info.elf_hdr.e_shoff, SEEK_SET);
-	Read(info.fd, info.shdr_tab, info.elf_hdr.e_shnum * info.elf_hdr.e_shentsize);
+	Read(info.fd, shdr_tab, shdr_bytes);
 
-	if(dynamic) {
-		info.dyn_table = malloc(dynamic->p_memsz);
-		lseek(info.fd, dynamic->p_offset, SEEK_SET);
-		Read(info.fd, info.dyn_table, dynamic->p_memsz);
+	if(len)
+		*len = info.elf_hdr.e_shnum;
 
-		uint64_t str_sz = find_dyn(info.dyn_table, DT_STRSZ)->d_un.d_val;
-		info.strtab = malloc(str_sz);
-		size_t offset = find_dyn(info.dyn_table, DT_STRTAB)->d_un.d_ptr - find_phdr(info.p_tab, info.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
-		lseek(info.fd, offset, SEEK_SET);
-		Read(info.fd, info.strtab, str_sz);
+	return shdr_tab;
+}
 
-		size_t symtab_bytes = info.elf_hdr.e_shentsize * info.elf_hdr.e_shnum;
-		info.symtab = malloc(symtab_bytes);
-		lseek(info.fd, info.elf_hdr.e_shoff, SEEK_SET);
-		Read(info.fd, info.symtab, symtab_bytes);
-	} else {
-		info.dyn_table = NULL;
-		info.strtab = NULL;
-		info.symtab = NULL;
+
+Elf64_Shdr* find_shdr(Elf64_Shdr* table, size_t len, uint64_t tag) {
+	for(Shdr* it = table; it < table + len; ++it) {
+		if(it->sh_type == tag)
+			return it;
 	}
-
-	return info;
+	return NULL;
 }
 
 Elf64_Dyn* find_dyn(Elf64_Dyn* table, uint64_t tag) {
@@ -302,6 +352,10 @@ void* Mmap(void *start, ssize_t length, int prot, int flags, int fd, off_t offse
 	mmap_list->list[mmap_list->idx++] = (Pair) { .ptr = ret, .len = MEM_CEIL(length, PAGE_SIZE) };
 	DEBUG("Virtual address: [%p, %p), total memory usage: %llu B\n", ret, ret + length, memory_usage);
 	return ret;
+}
+
+bool islibrary(const char* path) {
+	return strstr(path, ".so");
 }
 
 void Munmap(void* addr, size_t len) {
