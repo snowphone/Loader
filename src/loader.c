@@ -19,24 +19,31 @@ static void* bind_segment(const int fd, const Ehdr* const elf_hdr, const Phdr* c
 void exec(const char* filename) {
 	DEBUG("Loading %s...\n", filename);
 	memory_usage = 0;
-	Info l_info = read_elf(filename);
+	Info record = read_elf(filename);
 
-	for(Phdr* it = l_info.p_tab; it != l_info.p_tab + l_info.elf_hdr.e_phnum; ++it) {
+	for(Phdr* it = record.p_tab; it != record.p_tab + record.elf_hdr.e_phnum; ++it) {
 		if(it->p_type == PT_LOAD){
-			uint64_t mapped_addr = (uint64_t)bind_segment(l_info.fd, &l_info.elf_hdr, it);
-			if(!l_info.base_addr)
-				l_info.base_addr = mapped_addr;
+			uint64_t mapped_addr = (uint64_t)bind_segment(record.fd, &record.elf_hdr, it);
+			if(!record.start_addr) {
+				record.start_addr = mapped_addr;
+			}
 		}
 	}
-	const void* interp = find_phdr(l_info.p_tab, l_info.elf_hdr.e_phnum, PT_INTERP);
-	if(interp) {
-		load_library(l_info);
-		relocate(l_info);
+
+	assert(record.start_addr % PAGE_SIZE == find_phdr(record.p_tab, record.elf_hdr.e_phnum, PT_LOAD)->p_vaddr);
+	
+	if(islibrary(filename)) {
+		append_lib(record);
+	}
+
+	if(record.elf_hdr.e_type == ET_DYN) {
+		load_library(record);
+		relocate(record);
 	} 
 
 	if(!islibrary(filename)) {
 		DEBUG("%s is executable binary!\n", filename);
-		info = l_info;
+		info = record;
 		switch_context(info);
 
 		release_memory();

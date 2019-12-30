@@ -5,6 +5,9 @@
 
 extern void exec(const char*);
 
+static Info dependencies[128];
+static size_t dependencies_len = 0;
+
 static const char* base_dir[] = {
 	"/usr/local/lib/",
 	"/usr/local/lib/x86_64-linux-gnu/",
@@ -30,55 +33,35 @@ char* get_valid_lib_path(const char* path) {
 	return NULL;
 }
 
-static uint64_t loaded_lib_list[512];
-static uint64_t loaded_lib_len = 0;
-
-static uint64_t hash(const char* str) {
-	uint64_t hash = 0;
-	for(const char* it = str; *it; ++it) {
-		hash += *it;
-		hash += (hash << 10);
-		hash ^= (hash >> 6);
-	}
-	hash += (hash << 3);
-	hash ^=(hash >> 11);
-	hash += (hash << 15);
-
-	return hash;
-}
-
-static bool already_loaded(const char* str) {
-	uint64_t hashed = hash(str);
-	for(int i = 0; i < loaded_lib_len; ++i) {
-		if(hashed == loaded_lib_list[i])
+static bool already_loaded(const char* lib_name) {
+	for(int i = 0; i < dependencies_len; ++i) {
+		if(strstr(*dependencies[i].argv, lib_name)) {
 			return true;
+		}
 	}
 	return false;
 }
 
-static void append_lib(const char* str) {
-	assert(loaded_lib_len < sizeof loaded_lib_list);
-	uint64_t hashed = hash(str);
-	loaded_lib_list[loaded_lib_len++] = hashed;
+void append_lib(const Info info) {
+	assert(dependencies_len < sizeof dependencies);
+	dependencies[dependencies_len++] = info;
 }
 
 void load_library(Info info) {
 	Elf64_Dyn* dyn_table = get_dyn_tab(info, NULL);
-	char* strtab = get_strtab(info);
+	char* strtab = get_strtab(info, NULL);
 
 	for(Elf64_Dyn* it = dyn_table; it->d_tag != DT_NULL; ++it) {
 		if(it->d_tag == DT_NEEDED) {
 			const char* filename = strtab + it->d_un.d_ptr;
 			if(memcmp(filename, "ld", 2) == 0) {
-				DEBUG("Do not load %s because it is dynamic loader\n", filename);
+				DEBUG("Do not load %s since it is dynamic loader\n", filename);
 				continue;
 			} else if(already_loaded(filename)) {
-				DEBUG("Do not load %s because it is already loaded\n", filename);
+				DEBUG("Do not load %s since it is already loaded\n", filename);
 				continue;
 			}
 			const char* full_path = get_valid_lib_path(filename);
-			append_lib(filename);
-			DEBUG("New library: %s\n", full_path);
 			exec(full_path);
 		}
 	}
@@ -86,22 +69,41 @@ void load_library(Info info) {
 	free(strtab);
 }
 
-Shdr* get_plt(const Info info) {
-	Shdr* result = NULL;
-	size_t shdr_tab_len;
-	Shdr* shdr_tab = get_shdr_tab(info, &shdr_tab_len);
-	int cnt = 0;
-	for(Shdr* it = shdr_tab; it != shdr_tab + shdr_tab_len; ++it) {
-		if(it->sh_type == SHT_PROGBITS && it->sh_flags == (SHF_ALLOC | SHF_EXECINSTR)) {
-			++cnt;
-		}
-		if(cnt == 2) {
-			result = it;
-			break;
-		}
-	}
+static uint64_t get_valid_addr(const char* symbol_name) {
+	DEBUG("Current function: %s\tSymbol: %s\n", __func__, symbol_name);
+	uint64_t result = 0;
+	Info *dep,
+		 *dep_end = dependencies + dependencies_len;
 
-	free(shdr_tab);
+
+	for(Info* dep = dependencies; dep != dep_end; ++dep) {
+		size_t symtab_len;
+		Elf64_Sym* symtab = get_dynsym_tab(*dep, &symtab_len);
+		size_t strtab_len;
+		char* strtab = get_strtab(*dep, &strtab_len);
+
+		for(Elf64_Sym* sym = symtab; sym != symtab + symtab_len; ++sym) {
+			size_t stt = ELF64_ST_TYPE(sym->st_info);
+			const char* candidate = strtab + sym->st_name;
+			if(sym->st_name >= strtab_len)
+				continue;
+			if(strcmp(symbol_name, candidate)) 
+				continue;
+			DEBUG("@@@@@@@@@@@@@@@@@@ Eureka! @@@@@@@@@@@@@@@@@@\n");
+
+			result = sym->st_value + dep->start_addr;
+
+
+			free(symtab);
+			free(strtab);
+
+			goto exit;
+		}
+
+		free(symtab);
+		free(strtab);
+	}
+exit:
 	return result;
 }
 
@@ -109,7 +111,7 @@ void relocate(Info info) {
 	DEBUG("Current function: %s\n", __func__);
 
 	Elf64_Dyn* dyn_table = get_dyn_tab(info, NULL);
-	char* strtab = get_strtab(info);
+	char* strtab = get_strtab(info, NULL);
 	Elf64_Sym* symtab = get_dynsym_tab(info, NULL);
 	/* 
 	 * DT_JMPREL: .rela.plt section을 가리킴
@@ -119,19 +121,16 @@ void relocate(Info info) {
 	 * DT_PLTGOT: .got section을 가리킴
 	 * DT_PLTREL: RELA를 사용할지 REL을 사용할지 담김
 	 */
-	Elf64_Dyn *rela_plt = (void*)find_dyn(dyn_table, DT_JMPREL),
-			  *plt_rel_sz = (void*)find_dyn(dyn_table, DT_PLTRELSZ),
-			  *got = (void*)find_dyn(dyn_table, DT_PLTGOT),
+	Elf64_Dyn *plt_rel_sz = (void*)find_dyn(dyn_table, DT_PLTRELSZ),
 			  *pltrel = (void*)find_dyn(dyn_table, DT_PLTREL),
 			  *rela_dyn = (void*)find_dyn(dyn_table, DT_RELA),
 			  *rela_sz = (void*)find_dyn(dyn_table, DT_RELASZ);
 
 	assert(pltrel->d_un.d_val == DT_RELA);
 
-	Elf64_Rela* rela_tab = (void*)rela_dyn->d_un.d_ptr + info.base_addr; 	// .rela.plt verified
+	Elf64_Rela* rela_tab = (void*)rela_dyn->d_un.d_ptr + info.start_addr; 	// .rela.plt verified
 	size_t rela_tab_bytes = rela_sz->d_un.d_val + plt_rel_sz->d_un.d_val,
 		   rela_tab_len = rela_tab_bytes / sizeof *rela_tab;
-	DEBUG("GOT Address: %#lx\n", got->d_un.d_ptr);
 	DEBUG("rela addr: %p, # of entries: %lu\n", rela_tab, rela_tab_len);
 
 	for(int i = 0; i < rela_tab_len; ++i) {
@@ -139,15 +138,16 @@ void relocate(Info info) {
 				 sym_idx = ELF64_R_SYM(rela_tab[i].r_info);
 
 		if(type == R_X86_64_JUMP_SLOT || type == R_X86_64_GLOB_DAT) {
-			if(!symtab){
-				DEBUG("SHITTTTTTTTTTTTTTTTTTTTT!\n");
-				continue;
-			}
-			char* name = symtab[sym_idx].st_name + strtab;
-			DEBUG("#%d: %#lx, %#lx, %#lx\t", i, rela_tab[i].r_offset, rela_tab[i].r_info, rela_tab[i].r_addend);
-			DEBUG("Type : %#lx, sym_idx: %#lx, name: %s\n", type, sym_idx, name);
+			const char* symbol_name = symtab[sym_idx].st_name + strtab;
+			uint64_t* symbol_got = (uint64_t*)rela_tab[i].r_offset;
+		//	DEBUG("#%d: %#lx, %#lx, %#lx\t", i, rela_tab[i].r_offset, rela_tab[i].r_info, rela_tab[i].r_addend);
+		//	DEBUG("Type : %#lx, sym_idx: %#lx, name: %s\n", type, sym_idx, symbol_name);
+			uint64_t new_addr = get_valid_addr(symbol_name);
+			*symbol_got = new_addr;// + rela_tab[i].r_addend;
+			DEBUG("%s's address: %#lx\n", symbol_name, *symbol_got);
 		} 
 	}
+	DEBUG("Start addr: %p\n", (void*)info.start_addr);
 	free(dyn_table);
 	free(strtab);
 	free(symtab);

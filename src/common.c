@@ -8,7 +8,7 @@ const char** envp = NULL;
 
 Info info = {
 	.fd = 0,
-	.base_addr = 0,
+	.start_addr = 0,
 	.p_tab = NULL,
 	.argc = 0,
 	.argv = NULL,
@@ -100,7 +100,7 @@ static void create_stack(const Info info, void** _beg, void** _sp) {
 					it->a_un.a_val = info.elf_hdr.e_phentsize;
 					break;
 				case AT_PHDR:
-					it->a_un.a_val = info.base_addr + info.elf_hdr.e_phoff;
+					it->a_un.a_val = info.start_addr + info.elf_hdr.e_phoff;
 					break;
 			}
 		}
@@ -141,11 +141,10 @@ void switch_context(const Info info) {
 	loadee_context.uc_stack.ss_size = sp - sp_begin;
 	loadee_context.uc_stack.ss_sp = sp_begin;
 
-	void* entry = (void*)info.elf_hdr.e_entry;
-	Elf64_Dyn* dyn_table = get_dyn_tab(info, NULL);
-	if(dyn_table)
-		entry += info.base_addr;
-	makecontext(&loadee_context, entry, 0);
+	uint64_t entry = info.elf_hdr.e_entry;
+	if(info.start_addr != entry)
+		entry += info.start_addr;
+	makecontext(&loadee_context, (void*)entry, 0);
 
 	loadee_context.uc_mcontext.gregs[REG_RSP] = (greg_t)sp;
 	loadee_context.uc_mcontext.gregs[REG_RDX] = (greg_t)catcher;	// Exploit rtld_fini
@@ -153,7 +152,6 @@ void switch_context(const Info info) {
 	fputs("================== Context Switching ==================\n", stderr);
 	swapcontext(&loader_context, &loadee_context);
 	fputs("=================== Back to Loader ====================\n", stderr);
-	free(dyn_table);
 }
 
 /**
@@ -173,7 +171,7 @@ Info read_elf(const char* filename) {
 		.argc = 1,
 		.argv = argv,
 		.envp = envp,
-		.base_addr = 0
+		.start_addr = 0
 	};
 
 	if(record.fd == -1) {
@@ -197,7 +195,7 @@ Info read_elf(const char* filename) {
 	lseek(record.fd, record.elf_hdr.e_phoff, SEEK_SET);
 	Read(record.fd, record.p_tab, p_tab_sz);
 
-	record.base_addr = find_phdr(record.p_tab, record.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
+	record.start_addr = find_phdr(record.p_tab, record.elf_hdr.e_phnum, PT_LOAD)->p_vaddr;
 	
 	return record;
 }
@@ -220,7 +218,7 @@ Elf64_Dyn* get_dyn_tab(Info info, size_t* len) {
 	return dyn_table;
 }
 
-char* get_strtab(Info info) {
+char* get_strtab(Info info, size_t* len) {
 	Elf64_Dyn* dyn_table = get_dyn_tab(info, NULL);
 	uint64_t str_sz = find_dyn(dyn_table, DT_STRSZ)->d_un.d_val;
 	char* strtab = malloc(str_sz);
@@ -229,18 +227,20 @@ char* get_strtab(Info info) {
 	Read(info.fd, strtab, str_sz);
 
 	free(dyn_table);
+	if(len)
+		*len = str_sz;
 	return strtab;
 }
 
 Elf64_Sym* get_dynsym_tab(Info info, size_t* len) {
-	if(len)
-		*len = 0;
 	size_t shdr_len;
 	Shdr* shdr_tab = get_shdr_tab(info, &shdr_len);
 	Shdr* symtab_hdr = find_shdr(shdr_tab, shdr_len, SHT_DYNSYM);
 
-	if(!symtab_hdr) 
+	if(!symtab_hdr)  {
+		if(len) *len = 0;
 		return NULL;
+	}
 
 	size_t symtab_bytes = symtab_hdr->sh_entsize * symtab_hdr->sh_size;
 
@@ -249,7 +249,7 @@ Elf64_Sym* get_dynsym_tab(Info info, size_t* len) {
 	Read(info.fd, symtab, symtab_bytes);
 
 	if(len)
-		*len = symtab->st_size;
+		*len = symtab_hdr->sh_size;
 
 	free(shdr_tab);
 	return symtab;

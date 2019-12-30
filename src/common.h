@@ -63,7 +63,7 @@ typedef Elf64_auxv_t Auxv_t;
 typedef struct Info {
 	uint64_t fd;
 	Ehdr elf_hdr;
-	uint64_t base_addr;
+	uint64_t start_addr;
 	Phdr* p_tab;	// program header table
 	uint64_t argc;
 	const char** argv;
@@ -120,7 +120,7 @@ Shdr* get_shdr_tab(Info info, size_t* len);
 
 Elf64_Sym* get_dynsym_tab(Info info, size_t* len);
 
-char* get_strtab(Info info);
+char* get_strtab(Info info, size_t* len);
 
 Elf64_Dyn* get_dyn_tab(Info info, size_t* len);
 
